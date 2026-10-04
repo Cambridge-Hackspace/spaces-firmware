@@ -15,9 +15,9 @@ jobs:
   # get wrong.
   core:
     name: Protocol core (host)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rustup reads rust-toolchain.toml, so the pinned nightly is installed
       # on first use.
       - name: Format
@@ -31,14 +31,14 @@ jobs:
 
   firmware:
     name: Firmware (esp32c6)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install ldproxy
         run: cargo install ldproxy --locked
       # The first build downloads ESP-IDF and its toolchain into .embuild;
       # caching it saves most of a build's time.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .embuild
           key: embuild-${{ runner.os }}-${{ hashFiles('.cargo/config.toml', 'sdkconfig.defaults') }}
