@@ -10,4 +10,8 @@ rust-version.workspace = true
 [dependencies]
 spaces-device.workspace = true
 esp-idf-svc.workspace = true
+embedded-svc = "0.29"
 log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"

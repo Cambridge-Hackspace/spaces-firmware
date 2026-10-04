@@ -17,6 +17,7 @@ test = false
 spaces-device-espidf.workspace = true
 esp-idf-svc.workspace = true
 log.workspace = true
+anyhow = "1"
 
 [build-dependencies]
 embuild.workspace = true
