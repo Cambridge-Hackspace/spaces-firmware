@@ -15,8 +15,9 @@ It is two things at once:
 
 The protocol itself is described in the platform's `FIRMWARE.md`.
 
-> Work in progress. What is here so far boots on the board and proves the
-> flashing setup; the protocol is next.
+> Work in progress. The demo runs the protocol end to end against a stand-in
+> edge, and takes firmware updates over the network; a real edge, and notes on
+> what the protocol document leaves open, are next.
 
 ## Layout
 
@@ -26,7 +27,7 @@ The protocol itself is described in the platform's `FIRMWARE.md`.
 | `spaces-device-espidf/` | running it on ESP-IDF |
 | `examples/buttons/` | the demo firmware |
 | `partitions.csv` | two app slots, for updates over the air |
-| `scripts/cargo-runner.sh` | what `cargo run` uses to flash |
+| `scripts/cargo-runner.sh` | what `cargo run` uses to flash, or to push over the network |
 
 ## Building
 
@@ -49,6 +50,35 @@ through a Windows espflash:
 ESPFLASH=/path/to/espflash.exe ESPFLASH_PORT=COM13 ESPFLASH_BEFORE=usb-reset \
   cargo run --release
 ```
+
+### Updating over the network
+
+Once a module is running, new firmware can be pushed to it, through
+[esp-ota-push]:
+
+```sh
+cargo run --release -- 192.168.1.50
+```
+
+That builds, converts, uploads, and waits for the verdict. The new image is on
+probation until it gets back to what the old one had when the update arrived
+(on the network, on the edge's broker, or with the setup access point up); if
+it cannot within three minutes, the board goes back to the old image by itself,
+and the push reports it. While an update is written, the status light blinks
+cyan.
+
+Updates are refused until a **firmware update password** has been set on the
+setup page, and while a tool session is open. The username is `admin`; the
+password is read from `~/.netrc` (or the file in `ESP_OTA_NETRC`), or asked
+for, and never goes on a command line:
+
+```
+machine 192.168.1.50 login admin password <the password>
+```
+
+A browser works too: `http://<the module>/update`.
+
+[esp-ota-push]: https://forge.axonibyte.com/axonibyte/esp-ota-push
 
 ### The ESP32-C6 Super Mini
 

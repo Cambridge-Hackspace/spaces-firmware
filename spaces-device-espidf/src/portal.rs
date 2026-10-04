@@ -15,6 +15,7 @@ use spaces_device::form::parse_form;
 use spaces_device::setup_page;
 
 use crate::store::{Field, Store};
+use crate::update::Updates;
 
 /// The encoding goes in the header as well as the page: a browser trusts the
 /// header first, and an invite made of emoji depends on it.
@@ -22,12 +23,20 @@ const HTML: &[(&str, &str)] = &[("Content-Type", "text/html; charset=utf-8")];
 
 /// Serve the portal until the settings are saved. Returns when the page has
 /// told the browser it is done; the caller then restarts.
-pub fn run(store: &Store, fields: &'static [Field], title: &str) -> anyhow::Result<()> {
+/// Firmware updates are served alongside, so a module stuck in setup can
+/// still be given new firmware over its own access point.
+pub fn run(
+    store: &Store,
+    fields: &'static [Field],
+    title: &str,
+    updates: &Updates,
+) -> anyhow::Result<()> {
     let (saved_tx, saved_rx) = mpsc::channel::<()>();
     let mut server = EspHttpServer::new(&Configuration {
         stack_size: 10240,
         ..Default::default()
     })?;
+    updates.register(&mut server)?;
 
     {
         let store = store.clone();

@@ -56,6 +56,14 @@ impl StatusLight {
         StatusLight { status: None }
     }
 
+    /// What it is showing; Online for a light that is not there.
+    pub fn get(&self) -> Status {
+        self.status
+            .as_ref()
+            .and_then(|shared| Status::from_u8(shared.load(Ordering::Relaxed)))
+            .unwrap_or(Status::Online)
+    }
+
     pub fn set(&self, status: Status) {
         if let Some(shared) = &self.status {
             shared.store(status as u8, Ordering::Relaxed);

@@ -33,6 +33,7 @@ use spaces_device::Config;
 use spaces_device_espidf::run::{Event, Outputs};
 use spaces_device_espidf::status_light::{Status, StatusLight};
 use spaces_device_espidf::store::{self, Field};
+use spaces_device_espidf::update::Updates;
 
 /// The demo's own settings, on top of the ones every module needs.
 const ALICE_CARD: &str = "alice_card";
@@ -58,14 +59,16 @@ const DEMO_FIELDS: &[Field] = &[
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    // esp-idf-svc logs every storage handle it closes, which buries the
-    // narration this demo exists to show. Its logger follows ESP-IDF's
+    // esp-idf-svc logs every storage and OTA handle it closes, which buries
+    // the narration this demo exists to show. Its logger follows ESP-IDF's
     // per-tag levels, and a Rust target is its tag.
-    unsafe {
-        esp_idf_svc::sys::esp_log_level_set(
-            c"esp_idf_svc::nvs".as_ptr(),
-            esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN,
-        );
+    for tag in [c"esp_idf_svc::nvs", c"esp_idf_svc::ota"] {
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                tag.as_ptr(),
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN,
+            );
+        }
     }
 
     let version = env!("CARGO_PKG_VERSION");
@@ -80,6 +83,14 @@ fn main() -> anyhow::Result<()> {
 
     let pins = peripherals.pins;
     let light = StatusLight::start(pins.gpio8, Status::Connecting);
+    // Early, so an image on probation is being watched from the start.
+    let updates = Updates::start(
+        nvs.clone(),
+        store::Store::new(nvs.clone()),
+        light.clone(),
+        env!("CARGO_PKG_NAME"),
+        version,
+    );
     // Hold BOOT for three seconds at any time to get back to the setup page.
     spaces_device_espidf::watch_setup_button(
         PinDriver::input(pins.gpio9, Pull::Up)?,
@@ -102,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         fields,
         version,
         light.clone(),
+        updates,
     ) {
         Ok(online) => online,
         Err(e) => {

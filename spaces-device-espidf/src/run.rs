@@ -17,6 +17,7 @@ use spaces_device::wire::topic;
 
 use crate::status_light::Status;
 use crate::store::key;
+use crate::update;
 use crate::Online;
 
 /// How often the loop checks the time even when nothing has happened. A lease
@@ -113,7 +114,12 @@ pub fn run(
     let started = Instant::now();
     let now = || started.elapsed().as_millis() as u64;
     let mut module = Module::new(config);
-    apply(module.start(now()), &mut client, &mut outputs);
+    apply(
+        module.start(now()),
+        &mut client,
+        &mut outputs,
+        &online.updates,
+    );
 
     loop {
         let actions = match events.recv_timeout(TICK) {
@@ -130,6 +136,7 @@ pub fn run(
             Ok(Event::Connected) => {
                 log::info!("connected to the local broker; subscribing");
                 online.light.set(Status::Online);
+                online.updates.reach(update::BROKER);
                 for name in topic::SUBSCRIPTIONS {
                     if let Err(e) = client.subscribe(name, QoS::AtMostOnce) {
                         log::warn!("could not subscribe to {name}: {e}");
@@ -143,21 +150,30 @@ pub fn run(
                 // runs out. A disconnect is not trusted to be noticed.
                 log::warn!("lost the local broker; reconnecting");
                 online.light.set(Status::BrokerLost);
+                online.updates.lose(update::BROKER);
                 module.tick(now())
             }
             Err(RecvTimeoutError::Timeout) => module.tick(now()),
             Err(RecvTimeoutError::Disconnected) => anyhow::bail!("event channel closed"),
         };
-        apply(actions, &mut client, &mut outputs);
+        apply(actions, &mut client, &mut outputs, &online.updates);
     }
 }
 
-fn apply(actions: Vec<Action>, client: &mut EspMqttClient<'_>, outputs: &mut impl Outputs) {
+fn apply(
+    actions: Vec<Action>,
+    client: &mut EspMqttClient<'_>,
+    outputs: &mut impl Outputs,
+    updates: &update::Updates,
+) {
     for action in actions {
         match action {
             Action::Set { output, on } => {
                 log::info!("{output:?} {}", if on { "ON" } else { "off" });
                 outputs.set(output, on);
+                if output == Output::Tool {
+                    updates.set_in_session(on);
+                }
             }
             Action::Publish { topic, payload } => {
                 // enqueue, not publish: publish waits on the network, up to

@@ -607,6 +607,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-ota-push"
+version = "0.1.0"
+source = "git+https://forge.axonibyte.com/axonibyte/esp-ota-push?tag=v0.1.0#b132bf3d4b3a554ba3e80333de82964bcceb114a"
+dependencies = [
+ "esp-idf-svc",
+ "esp-ota-push-core",
+ "log",
+]
+
+[[package]]
+name = "esp-ota-push-core"
+version = "0.1.0"
+source = "git+https://forge.axonibyte.com/axonibyte/esp-ota-push?tag=v0.1.0#b132bf3d4b3a554ba3e80333de82964bcceb114a"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,6 +1247,7 @@ dependencies = [
  "anyhow",
  "embedded-svc",
  "esp-idf-svc",
+ "esp-ota-push",
  "log",
  "serde",
  "serde_json",

@@ -24,6 +24,7 @@ pub mod key {
     pub const BROKER_PASS: &str = "broker_pass";
     pub const TOOL_ID: &str = "tool_id";
     pub const NAME: &str = "name";
+    pub const OTA_PASS: &str = "ota_pass";
     /// Set by the BOOT-button watcher, read and cleared at the next boot.
     pub const SETUP_REQUESTED: &str = "setup_req";
 }
@@ -81,6 +82,13 @@ pub const FIELDS: &[Field] = &[
         key: key::BROKER_PASS,
         label: "Broker password",
         hint: "leave blank to keep the saved one",
+        secret: true,
+        required: false,
+    },
+    Field {
+        key: key::OTA_PASS,
+        label: "Firmware update password",
+        hint: "for pushing new firmware over the network, as user admin; none set means no updates; leave blank to keep the saved one",
         secret: true,
         required: false,
     },

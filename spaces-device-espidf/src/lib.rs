@@ -6,6 +6,7 @@
 //! - [`portal`]: the setup page.
 //! - [`register`]: claiming an invite over HTTPS.
 //! - [`run`]: the broker connection and the loop that drives the protocol.
+//! - [`update`]: taking new firmware over the network, with rollback.
 //! - [`boot`]: putting those together in the right order.
 
 pub mod portal;
@@ -13,6 +14,7 @@ pub mod register;
 pub mod run;
 pub mod status_light;
 pub mod store;
+pub mod update;
 pub mod wifi;
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -22,6 +24,7 @@ use spaces_device::registration::RegisterRequest;
 
 use status_light::{Status, StatusLight};
 use store::{key, Credentials, Field, Store};
+use update::Updates;
 use wifi::Wifi;
 
 /// A module that is on the network and registered, ready to talk to its edge.
@@ -31,6 +34,10 @@ pub struct Online {
     pub credentials: Credentials,
     pub address: String,
     pub light: StatusLight,
+    pub updates: Updates,
+    /// Serves firmware updates on the network, and nothing else. Kept here so
+    /// it lives as long as the module does.
+    pub update_server: Option<esp_idf_svc::http::server::EspHttpServer<'static>>,
 }
 
 /// Watch a button (BOOT, on the demo) and, once it has been held for three
@@ -84,11 +91,14 @@ pub fn boot(
     fields: &'static [Field],
     software_version: &str,
     light: StatusLight,
+    updates: Updates,
 ) -> anyhow::Result<Online> {
     let store = Store::new(nvs.clone());
     let force_setup = store.get(key::SETUP_REQUESTED).is_some();
     if force_setup {
         store.remove(key::SETUP_REQUESTED)?;
+        // A person chose setup mode; that is not the new image failing.
+        updates.vouch();
     }
     let mut wifi = Wifi::new(modem, sysloop, nvs)?;
     let setup_name = format!("spaces-setup-{}", short_id(&wifi.mac()?));
@@ -100,7 +110,7 @@ pub fn boot(
             log::info!("not configured yet");
         }
         light.set(Status::Setup);
-        setup(&mut wifi, &store, fields, &setup_name);
+        setup(&mut wifi, &store, fields, &setup_name, &updates);
     }
 
     light.set(Status::Connecting);
@@ -110,6 +120,14 @@ pub fn boot(
     // unsecured access point to anyone in range whenever the network went
     // away for long enough; BOOT is the way into setup instead.
     let address = wifi.join(&ssid, &pass)?;
+    updates.reach(update::NETWORK);
+    let update_server = match updates.serve() {
+        Ok(server) => Some(server),
+        Err(e) => {
+            log::warn!("not taking firmware updates: {e}");
+            None
+        }
+    };
 
     let credentials = match store.credentials() {
         Some(c) => {
@@ -150,13 +168,24 @@ pub fn boot(
         credentials,
         address,
         light,
+        updates,
+        update_server,
     })
 }
 
-fn setup(wifi: &mut Wifi, store: &Store, fields: &'static [Field], name: &str) -> ! {
+fn setup(
+    wifi: &mut Wifi,
+    store: &Store,
+    fields: &'static [Field],
+    name: &str,
+    updates: &Updates,
+) -> ! {
     if let Err(e) = wifi.host(name) {
         log::error!("could not start the setup access point: {e}");
-    } else if let Err(e) = portal::run(store, fields, "Spaces module setup") {
+    } else if let Err(e) = {
+        updates.reach(update::SETUP_AP);
+        portal::run(store, fields, "Spaces module setup", updates)
+    } {
         log::error!("setup portal failed: {e}");
     }
     log::info!("restarting");

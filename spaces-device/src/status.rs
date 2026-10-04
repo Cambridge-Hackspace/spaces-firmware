@@ -22,16 +22,19 @@ pub enum Status {
     BrokerLost,
     /// Stopped by an error, about to restart.
     Failed,
+    /// Receiving new firmware. Leave it powered.
+    Updating,
 }
 
 impl Status {
     /// Every status, for code that stores one as a number.
-    pub const ALL: [Status; 5] = [
+    pub const ALL: [Status; 6] = [
         Status::Setup,
         Status::Connecting,
         Status::Online,
         Status::BrokerLost,
         Status::Failed,
+        Status::Updating,
     ];
 
     /// The inverse of `status as u8`.
@@ -63,11 +66,18 @@ const AMBER: Rgb = Rgb {
 };
 const GREEN: Rgb = Rgb { r: 0, g: MAX, b: 0 };
 const RED: Rgb = Rgb { r: MAX, g: 0, b: 0 };
+const CYAN: Rgb = Rgb {
+    r: 0,
+    g: MAX,
+    b: MAX,
+};
 
 /// One pulse of the setup light, dark to bright to dark.
 pub const SETUP_PERIOD_MS: u64 = 2000;
 /// One on-and-off of the connecting blink.
 pub const BLINK_PERIOD_MS: u64 = 1000;
+/// One on-and-off of the updating blink: fast, so it reads as busy.
+pub const UPDATING_PERIOD_MS: u64 = 250;
 /// How often the online light flashes, and for how long.
 pub const ONLINE_PERIOD_MS: u64 = 3000;
 pub const ONLINE_FLASH_MS: u64 = 100;
@@ -80,6 +90,7 @@ pub const ONLINE_FLASH_MS: u64 = 100;
 ///   working module does not light up a room.
 /// - Broker lost: amber, steady.
 /// - Failed: red, steady.
+/// - Updating: cyan, blinking fast.
 pub fn colour(status: Status, now_ms: u64) -> Rgb {
     match status {
         Status::Setup => {
@@ -109,6 +120,13 @@ pub fn colour(status: Status, now_ms: u64) -> Rgb {
         }
         Status::BrokerLost => AMBER,
         Status::Failed => RED,
+        Status::Updating => {
+            if now_ms % UPDATING_PERIOD_MS < UPDATING_PERIOD_MS / 2 {
+                CYAN
+            } else {
+                Rgb::OFF
+            }
+        }
     }
 }
 
@@ -203,6 +221,19 @@ mod tests {
         // Lost-broker amber is the same colour as connecting, held steady:
         // "trying to get there" against "was there, now is not".
         assert_eq!(colour(Status::Connecting, 0), colour(Status::BrokerLost, 0));
+    }
+
+    #[test]
+    fn updating_blinks_cyan_fast_and_looks_like_nothing_else() {
+        assert_eq!(colour(Status::Updating, 0), CYAN);
+        assert_eq!(colour(Status::Updating, 124), CYAN);
+        assert_eq!(colour(Status::Updating, 125), Rgb::OFF);
+        assert_eq!(colour(Status::Updating, 250), CYAN);
+        for other in Status::ALL.into_iter().filter(|s| *s != Status::Updating) {
+            for t in (0..10_000).step_by(13) {
+                assert_ne!(colour(other, t), CYAN, "{other:?} at {t}");
+            }
+        }
     }
 
     #[test]
