@@ -1,5 +1,6 @@
 //! Runs a Spaces module on ESP-IDF.
 //!
+//! - [`status_light`]: the RGB LED that shows what the module is doing.
 //! - [`store`]: settings and credentials in flash.
 //! - [`wifi`]: joining a network, or hosting the setup one.
 //! - [`portal`]: the setup page.
@@ -10,6 +11,7 @@
 pub mod portal;
 pub mod register;
 pub mod run;
+pub mod status_light;
 pub mod store;
 pub mod wifi;
 
@@ -18,6 +20,7 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use spaces_device::registration::RegisterRequest;
 
+use status_light::{Status, StatusLight};
 use store::{key, Credentials, Field, Store};
 use wifi::Wifi;
 
@@ -27,6 +30,7 @@ pub struct Online {
     pub store: Store,
     pub credentials: Credentials,
     pub address: String,
+    pub light: StatusLight,
 }
 
 /// Watch a button (BOOT, on the demo) and, once it has been held for three
@@ -79,6 +83,7 @@ pub fn boot(
     nvs: EspDefaultNvsPartition,
     fields: &'static [Field],
     software_version: &str,
+    light: StatusLight,
 ) -> anyhow::Result<Online> {
     let store = Store::new(nvs.clone());
     let force_setup = store.get(key::SETUP_REQUESTED).is_some();
@@ -94,9 +99,11 @@ pub fn boot(
         } else {
             log::info!("not configured yet");
         }
+        light.set(Status::Setup);
         setup(&mut wifi, &store, fields, &setup_name);
     }
 
+    light.set(Status::Connecting);
     let ssid = store.get(key::WIFI_SSID).unwrap_or_default();
     let pass = store.get(key::WIFI_PASS).unwrap_or_default();
     // Tries until it joins. Falling back to setup mode here would open an
@@ -142,6 +149,7 @@ pub fn boot(
         store,
         credentials,
         address,
+        light,
     })
 }
 

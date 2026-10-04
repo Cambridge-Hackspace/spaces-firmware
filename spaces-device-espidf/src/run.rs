@@ -15,6 +15,7 @@ use esp_idf_svc::mqtt::client::{
 use spaces_device::module::{Action, Config, Module, Output};
 use spaces_device::wire::topic;
 
+use crate::status_light::Status;
 use crate::store::key;
 use crate::Online;
 
@@ -128,6 +129,7 @@ pub fn run(
             }
             Ok(Event::Connected) => {
                 log::info!("connected to the local broker; subscribing");
+                online.light.set(Status::Online);
                 for name in topic::SUBSCRIPTIONS {
                     if let Err(e) = client.subscribe(name, QoS::AtMostOnce) {
                         log::warn!("could not subscribe to {name}: {e}");
@@ -140,6 +142,7 @@ pub fn run(
                 // arriving and the module switches off when the current one
                 // runs out. A disconnect is not trusted to be noticed.
                 log::warn!("lost the local broker; reconnecting");
+                online.light.set(Status::BrokerLost);
                 module.tick(now())
             }
             Err(RecvTimeoutError::Timeout) => module.tick(now()),

@@ -14,6 +14,11 @@
 //!
 //! Buttons and the switch connect their pin to GND. Hold BOOT for three
 //! seconds at any time to get back to the setup portal.
+//!
+//! The board's own RGB LED, on GPIO 8, is the status light: blue pulsing for
+//! setup, amber blinking while connecting, a green flash every few seconds
+//! when all is well, steady amber when the edge's broker is lost, and red
+//! before restarting after an error.
 
 use std::ffi::CStr;
 use std::time::Duration;
@@ -26,6 +31,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use spaces_device::Config;
 use spaces_device_espidf::run::{Event, Outputs};
+use spaces_device_espidf::status_light::{Status, StatusLight};
 use spaces_device_espidf::store::{self, Field};
 
 /// The demo's own settings, on top of the ones every module needs.
@@ -73,6 +79,7 @@ fn main() -> anyhow::Result<()> {
     let nvs = EspDefaultNvsPartition::take()?;
 
     let pins = peripherals.pins;
+    let light = StatusLight::start(pins.gpio8, Status::Connecting);
     // Hold BOOT for three seconds at any time to get back to the setup page.
     spaces_device_espidf::watch_setup_button(
         PinDriver::input(pins.gpio9, Pull::Up)?,
@@ -88,10 +95,17 @@ fn main() -> anyhow::Result<()> {
             .into_boxed_slice(),
     );
 
-    let online = match spaces_device_espidf::boot(peripherals.modem, sysloop, nvs, fields, version)
-    {
+    let online = match spaces_device_espidf::boot(
+        peripherals.modem,
+        sysloop,
+        nvs,
+        fields,
+        version,
+        light.clone(),
+    ) {
         Ok(online) => online,
         Err(e) => {
+            light.set(Status::Failed);
             log::error!("{e:#}");
             log::error!("restarting in 30 s");
             std::thread::sleep(Duration::from_secs(30));
@@ -133,6 +147,7 @@ fn main() -> anyhow::Result<()> {
         Err(e) => log::error!("{e:#}"),
         Ok(never) => match never {},
     }
+    light.set(Status::Failed);
     log::error!("restarting in 5 s");
     std::thread::sleep(Duration::from_secs(5));
     esp_idf_svc::hal::reset::restart();

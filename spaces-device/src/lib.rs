@@ -7,6 +7,7 @@
 //! - [`module`]: the state machine that decides what to do with them.
 //! - [`registration`]: claiming an invite.
 //! - [`backoff`]: how long to wait before trying again.
+//! - [`status`]: what the status light shows.
 //! - [`setup_page`] and [`form`]: a device's own setup page.
 
 pub mod backoff;
@@ -14,6 +15,7 @@ pub mod form;
 pub mod module;
 pub mod registration;
 pub mod setup_page;
+pub mod status;
 pub mod wire;
 
 pub use module::{Action, Config, Module, Output};
