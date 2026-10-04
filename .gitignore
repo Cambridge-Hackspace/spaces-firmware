@@ -1,0 +1,6 @@
+/target/
+/.embuild/
+*.bin
+# esp-idf-sys writes this next to the workspace on every build.
+/components_esp32c6.lock
+*~

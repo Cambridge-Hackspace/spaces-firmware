@@ -1,0 +1,13 @@
+[package]
+name = "spaces-device-espidf"
+description = "Runs a Spaces module on ESP-IDF: Wi-Fi, storage, registration, MQTT, OTA"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+spaces-device.workspace = true
+esp-idf-svc.workspace = true
+log.workspace = true

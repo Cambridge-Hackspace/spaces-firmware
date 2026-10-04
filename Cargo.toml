@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["spaces-device", "spaces-device-espidf", "examples/buttons"]
+# `cargo build` and `cargo run` with no -p mean the demo firmware.
+default-members = ["examples/buttons"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Cambridge-Hackspace/spaces-firmware"
+rust-version = "1.85"
+
+[workspace.dependencies]
+spaces-device = { path = "spaces-device" }
+spaces-device-espidf = { path = "spaces-device-espidf" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+esp-idf-svc = "0.53"
+embuild = "0.33"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[profile.dev]
+# Symbols cost nothing on flash and make a crash backtrace readable.
+debug = true
+opt-level = "z"

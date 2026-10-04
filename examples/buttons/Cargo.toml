@@ -1,0 +1,22 @@
+[package]
+name = "buttons"
+description = "Spaces demo module: Alice, Bob, tool-off and running buttons, and two LEDs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "buttons"
+# The esp32 target has no test harness; tests live in spaces-device and run on
+# the host.
+test = false
+
+[dependencies]
+spaces-device-espidf.workspace = true
+esp-idf-svc.workspace = true
+log.workspace = true
+
+[build-dependencies]
+embuild.workspace = true

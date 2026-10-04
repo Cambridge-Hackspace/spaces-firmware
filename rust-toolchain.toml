@@ -1,0 +1,9 @@
+# The ESP32-C6 is RISC-V, which upstream Rust supports, so Espressif's own
+# compiler fork is not needed. Nightly is required only because the target's
+# standard library is built from source (`build-std` in .cargo/config.toml).
+#
+# Pinned to a date so that a build today and a build next month use the same
+# compiler.
+[toolchain]
+channel = "nightly-2026-05-23"
+components = ["rust-src", "rustfmt", "clippy"]

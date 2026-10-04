@@ -1,0 +1,21 @@
+# NB: integer and string values must not carry a trailing comment: kconfiglib
+# fails to parse the value and silently falls back to the esp-idf default.
+# Comments go on their own line.
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+CONFIG_FREERTOS_HZ=1000
+
+# --- flash and partitions ---------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+# Resolved against the CMake project dir, which for esp-idf-sys is the
+# generated project under target/<triple>/<profile>/build/esp-idf-sys-<hash>/out,
+# six levels below the repository root. A path that does not resolve is only a
+# CMake *warning*, so check the generated partition-table.bin after changing it.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions.csv"
+
+# A new image boots provisionally and is reverted unless it confirms itself.
+# This lives in the bootloader, so the bootloader built here must be the one
+# flashed: espflash otherwise writes its own.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

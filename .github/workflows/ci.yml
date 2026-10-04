@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The protocol core has no hardware in it, so it is built and tested on the
+  # runner itself. This is the job that guards the rules a module must never
+  # get wrong.
+  core:
+    name: Protocol core (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup reads rust-toolchain.toml, so the pinned nightly is installed
+      # on first use.
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test -p spaces-device --target x86_64-unknown-linux-gnu
+
+  firmware:
+    name: Firmware (esp32c6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
+      # The first build downloads ESP-IDF and its toolchain into .embuild;
+      # caching it saves most of a build's time.
+      - uses: actions/cache@v4
+        with:
+          path: .embuild
+          key: embuild-${{ runner.os }}-${{ hashFiles('.cargo/config.toml', 'sdkconfig.defaults') }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --release -- -D warnings
+      - name: Build
+        run: cargo build --release
