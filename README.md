@@ -116,7 +116,7 @@ An ESP32-C6 Super Mini on a breadboard, and:
 |---|---|---|
 | 3 | momentary push buttons (6×6 mm tactile) | Alice, Bob, Tool off |
 | 1 | on/off switch (a breadboard slide switch) | Running |
-| 2 | LEDs, two colours (say amber and green) | Tool, Running |
+| 2 | LEDs: green, and amber or red | Tool (green), Running (amber or red) |
 | 2 | 330 Ω resistors (100 Ω for blue or white LEDs) | one per LED |
 | | jumper wires | |
 
@@ -126,8 +126,8 @@ An ESP32-C6 Super Mini on a breadboard, and:
 | 19 | button to GND | Bob presents his |
 | 20 | button to GND | Tool off |
 | 21 | switch to GND | the machine is running (a laser firing, say) |
-| 22 | resistor, then LED, to GND | **Tool**: powered, authorized *and* leased |
-| 23 | resistor, then LED, to GND | **Running**: powered *and* the switch is on |
+| 22 | resistor, then green LED, to GND | **Tool**: powered, authorized *and* leased |
+| 23 | resistor, then amber or red LED, to GND | **Running**: powered *and* the switch is on; the warning light, as on a laser cutter |
 
 The inputs use the chip's own pull-ups, so the buttons need no resistors. The
 board's RGB LED is the status light:
