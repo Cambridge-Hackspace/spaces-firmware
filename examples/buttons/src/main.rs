@@ -58,7 +58,8 @@ const DEMO_FIELDS: &[Field] = &[
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
-    esp_idf_svc::log::EspLogger::initialize_default();
+    // Logs to serial as usual, and keeps them for the page at /log.
+    spaces_device_espidf::weblog::start();
     // esp-idf-svc logs every storage and OTA handle it closes, which buries
     // the narration this demo exists to show. Its logger follows ESP-IDF's
     // per-tag levels, and a Rust target is its tag.

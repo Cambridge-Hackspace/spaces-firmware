@@ -37,6 +37,7 @@ pub fn run(
         ..Default::default()
     })?;
     updates.register(&mut server)?;
+    crate::weblog::register(&mut server, store.clone())?;
 
     {
         let store = store.clone();

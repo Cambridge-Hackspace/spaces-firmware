@@ -87,8 +87,8 @@ pub const FIELDS: &[Field] = &[
     },
     Field {
         key: key::OTA_PASS,
-        label: "Firmware update password",
-        hint: "for pushing new firmware over the network, as user admin; none set means no updates; leave blank to keep the saved one",
+        label: "Device password",
+        hint: "for firmware updates and the web log, as user admin; none set means neither is served; leave blank to keep the saved one",
         secret: true,
         required: false,
     },

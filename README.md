@@ -71,8 +71,8 @@ it cannot within three minutes, the board goes back to the old image by itself,
 and the push reports it. While an update is written, the status light blinks
 cyan.
 
-Updates are refused until a **firmware update password** has been set on the
-setup page, and while a tool session is open. The username is `admin`; the
+Updates are refused until a **device password** has been set on the setup
+page, and while a tool session is open. The username is `admin`; the
 password is read from `~/.netrc` (or the file in `ESP_OTA_NETRC`), or asked
 for, and never goes on a command line:
 
@@ -81,6 +81,14 @@ machine 192.168.1.50 login admin password <the password>
 ```
 
 A browser works too: `http://<the module>/update`.
+
+### Reading the log
+
+The serial log is on the network too, at `http://<the module>/log`, behind the
+same password: everything the module logs, ESP-IDF's own messages included,
+live. The end of the log from before the last restart is kept as well (through
+a restart or a crash, not a power cut), with why it restarted, so a crash or a
+rolled-back update can be read about afterwards.
 
 [esp-ota-push]: https://forge.axonibyte.com/axonibyte/esp-ota-push
 
@@ -140,8 +148,8 @@ board's RGB LED is the status light:
 2. With nothing configured it starts in setup mode. Join its access point,
    `spaces-setup-…`, open `http://192.168.71.1/`, and fill in the Wi-Fi, the
    Spaces server, a device invite from `/admin/devices` (paste it), the edge's
-   broker and this module's login on it, the tool, a firmware update
-   password, and two cards: one authorized on the tool for Alice, one that
+   broker and this module's login on it, the tool, a device password (for
+   updates and the log), and two cards: one authorized on the tool for Alice, one that
    should be refused for Bob. Hold BOOT for three seconds to come back here.
 3. An administrator binds the device to the tool in the **`power`** role. Any
    other role can start a session, but only a `power` module is leased, so
@@ -158,8 +166,8 @@ board's RGB LED is the status light:
    commands typed into it to break things on purpose (listed at the top of the
    file).
 
-Keep the module's serial log open (`espflash monitor` over its USB): it
-narrates every message in and out.
+Keep the module's log open, at `http://<the module>/log` or over USB with
+`espflash monitor`: it narrates every message in and out.
 
 ### The script
 

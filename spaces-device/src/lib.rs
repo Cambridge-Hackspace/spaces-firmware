@@ -8,6 +8,7 @@
 //! - [`registration`]: claiming an invite.
 //! - [`backoff`]: how long to wait before trying again.
 //! - [`status`]: what the status light shows.
+//! - [`weblog`]: the log, kept for a web page.
 //! - [`setup_page`] and [`form`]: a device's own setup page.
 
 pub mod backoff;
@@ -16,6 +17,7 @@ pub mod module;
 pub mod registration;
 pub mod setup_page;
 pub mod status;
+pub mod weblog;
 pub mod wire;
 
 pub use module::{Action, Config, Module, Output};

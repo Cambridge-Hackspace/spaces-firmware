@@ -7,6 +7,7 @@
 //! - [`register`]: claiming an invite over HTTPS.
 //! - [`run`]: the broker connection and the loop that drives the protocol.
 //! - [`update`]: taking new firmware over the network, with rollback.
+//! - [`weblog`]: the log, served as a web page.
 //! - [`boot`]: putting those together in the right order.
 
 pub mod portal;
@@ -15,6 +16,7 @@ pub mod run;
 pub mod status_light;
 pub mod store;
 pub mod update;
+pub mod weblog;
 pub mod wifi;
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -121,10 +123,13 @@ pub fn boot(
     // away for long enough; BOOT is the way into setup instead.
     let address = wifi.join(&ssid, &pass)?;
     updates.reach(update::NETWORK);
-    let update_server = match updates.serve() {
+    let update_server = match updates.serve().and_then(|mut server| {
+        weblog::register(&mut server, store.clone())?;
+        Ok(server)
+    }) {
         Ok(server) => Some(server),
         Err(e) => {
-            log::warn!("not taking firmware updates: {e}");
+            log::warn!("not serving updates or the log: {e}");
             None
         }
     };

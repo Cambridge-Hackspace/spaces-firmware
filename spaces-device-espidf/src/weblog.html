@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device log</title>
+<style>
+  :root { --bg: #fff; --fg: #1d1d1d; --muted: #666; --line: #e3e3e3; --err: #b3261e; --warn: #8a5a00; --panel: #f6f6f6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161616; --fg: #e6e6e6; --muted: #9a9a9a; --line: #2c2c2c; --err: #ff8a80; --warn: #ffcc66; --panel: #202020; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+  header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line);
+           padding: .6rem 1rem; display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }
+  h1 { font-size: 1.05rem; margin: 0; }
+  #state { color: var(--muted); font-size: .9rem; }
+  label { font-size: .9rem; color: var(--muted); }
+  main { padding: .5rem 1rem 2rem; }
+  pre { margin: 0; font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere; }
+  .E { color: var(--err); }
+  .W { color: var(--warn); }
+  .gap { color: var(--muted); font-style: italic; }
+  details { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+            padding: .4rem .7rem; margin: .6rem 0 1rem; }
+  summary { cursor: pointer; font-size: .9rem; }
+  details pre { margin-top: .5rem; max-height: 40vh; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Device log</h1>
+  <span id="state">connecting…</span>
+  <label><input type="checkbox" id="follow" checked> follow</label>
+</header>
+<main>
+  <details id="previous" hidden>
+    <summary id="previous-title">Before the last restart</summary>
+    <pre id="previous-text"></pre>
+  </details>
+  <pre id="log"></pre>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let next = 0;
+let boot = null;
+let failures = 0;
+
+function addLine(text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text + "\n";
+  log.appendChild(span);
+}
+
+function level(line) {
+  const c = line.charAt(0);
+  return (c === "E" || c === "W") && line.charAt(1) === " " ? c : "";
+}
+
+async function previous() {
+  try {
+    const res = await fetch("/log/previous", { cache: "no-store" });
+    if (!res.ok) return;
+    const p = await res.json();
+    $("previous-title").textContent = "Restarted after " + p.reason +
+      (p.text ? ": the end of the log before that" : " (nothing kept from before)");
+    $("previous-text").textContent = p.text || "";
+    $("previous").hidden = false;
+    if (p.text && p.reason !== "a restart by the firmware") $("previous").open = true;
+  } catch (e) { /* the log itself will say the device is unreachable */ }
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/log/lines?since=" + next, { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status === 401 ? "password needed" : "HTTP " + res.status);
+    const b = await res.json();
+    if (boot !== null && b.boot !== boot) {
+      // The device restarted since the last look: start this boot's log.
+      boot = b.boot;
+      next = 0;
+      addLine("── the device restarted ──", "gap");
+      previous();
+      return poll();
+    }
+    boot = b.boot;
+    if (b.missed > 0) addLine("── " + b.missed + " lines dropped before they could be shown ──", "gap");
+    for (const line of b.lines) addLine(line, level(line));
+    next = b.next;
+    failures = 0;
+    $("state").textContent = "live";
+    if ($("follow").checked && b.lines.length) window.scrollTo(0, document.body.scrollHeight);
+  } catch (e) {
+    failures += 1;
+    $("state").textContent = "no answer from the device (" + e.message + "); retrying…";
+  }
+  setTimeout(poll, failures ? Math.min(5000, 1000 * failures) : 1000);
+}
+
+previous();
+poll();
+</script>
+</body>
+</html>
