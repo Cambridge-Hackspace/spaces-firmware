@@ -14,6 +14,7 @@ name = "buttons"
 test = false
 
 [dependencies]
+spaces-device.workspace = true
 spaces-device-espidf.workspace = true
 esp-idf-svc.workspace = true
 log.workspace = true

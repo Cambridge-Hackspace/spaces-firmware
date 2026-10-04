@@ -125,6 +125,7 @@ dependencies = [
  "embuild",
  "esp-idf-svc",
  "log",
+ "spaces-device",
  "spaces-device-espidf",
 ]
 

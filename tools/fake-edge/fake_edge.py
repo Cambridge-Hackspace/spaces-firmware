@@ -29,6 +29,13 @@ Usage:
 
     fake_edge.py --broker 192.168.1.10 --allow ALICE-CARD
 
+If the broker wants a login, give the username with --username and the
+password in a file with --password-file (so it never appears in `ps` or in
+your shell history):
+
+    fake_edge.py --broker 192.168.1.10 --username edge \
+        --password-file ~/.fake-edge-password --allow ALICE-CARD
+
 Needs paho-mqtt (pip install paho-mqtt).
 """
 
@@ -206,14 +213,25 @@ def main():
     parser.add_argument("--interval-ms", type=int, default=1000)
     parser.add_argument("--offline-ms", type=int, default=5000)
     parser.add_argument("--tool-uuid", default="7c9e6679-7425-40de-944b-e07fc1f90ae7")
+    parser.add_argument("--username")
+    parser.add_argument("--password-file",
+                        help="a file whose first line is the broker password")
     args = parser.parse_args()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="fake-edge")
+    if args.username:
+        password = None
+        if args.password_file:
+            with open(args.password_file) as f:
+                password = f.readline().rstrip("\n")
+        client.username_pw_set(args.username, password)
     edge = FakeEdge(client, args.allow, args.ttl_ms, args.interval_ms,
                     args.offline_ms, args.tool_uuid)
 
     def on_connect(client, _userdata, _flags, reason, _props):
         log("..", f"connected to {args.broker}:{args.port} ({reason})")
+        if reason.is_failure:
+            return
         # Subscribe on every connect: a clean session forgets subscriptions.
         for topic in (TOOL_ON_REQUEST, TOOL_OFF_REQUEST, TOOL_LOG_REQUEST, POWER_REPORT):
             client.subscribe(topic)

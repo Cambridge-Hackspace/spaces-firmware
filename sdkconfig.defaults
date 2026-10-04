@@ -19,3 +19,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions.csv"
 # This lives in the bootloader, so the bootloader built here must be the one
 # flashed: espflash otherwise writes its own.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- MQTT -------------------------------------------------------------------
+# The MQTT task waits this long listening for incoming data before it sends
+# anything queued, and the module queues everything (it must never block). At
+# the default of 1000 ms every request sat up to a second before leaving.
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_POLL_READ_TIMEOUT_MS=50

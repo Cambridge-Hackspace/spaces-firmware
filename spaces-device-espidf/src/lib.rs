@@ -4,10 +4,12 @@
 //! - [`wifi`]: joining a network, or hosting the setup one.
 //! - [`portal`]: the setup page.
 //! - [`register`]: claiming an invite over HTTPS.
+//! - [`run`]: the broker connection and the loop that drives the protocol.
 //! - [`boot`]: putting those together in the right order.
 
 pub mod portal;
 pub mod register;
+pub mod run;
 pub mod store;
 pub mod wifi;
 
@@ -27,10 +29,41 @@ pub struct Online {
     pub address: String,
 }
 
+/// Watch a button (BOOT, on the demo) and, once it has been held for three
+/// seconds, restart into setup mode.
+///
+/// Watched while running, not checked at power-on: on an ESP32, holding BOOT
+/// while the chip starts puts it into its download mode, so "hold BOOT at
+/// power-on" would never reach the firmware at all.
+pub fn watch_setup_button(
+    button: esp_idf_svc::hal::gpio::PinDriver<'static, esp_idf_svc::hal::gpio::Input>,
+    store: Store,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .stack_size(4096)
+        .spawn(move || {
+            let mut held_ms = 0u32;
+            loop {
+                if button.is_low() {
+                    held_ms += 100;
+                    if held_ms >= 3000 {
+                        log::info!("BOOT held for 3 s: restarting into setup");
+                        let _ = store.set(key::SETUP_REQUESTED, "1");
+                        esp_idf_svc::hal::reset::restart();
+                    }
+                } else {
+                    held_ms = 0;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        })?;
+    Ok(())
+}
+
 /// Get the module online and registered, or into setup mode trying.
 ///
-/// - No settings, or `force_setup` (e.g. BOOT held): run the setup portal, then
-///   restart. Does not return.
+/// - No settings, or setup requested with [`watch_setup_button`]: run the
+///   setup portal, then restart. Does not return.
 /// - Cannot join the network: fall back to the setup portal. Does not return.
 /// - Not yet registered: claim the invite, and save what comes back before
 ///   anything else. If that fails the module cannot work, and says so.
@@ -44,10 +77,13 @@ pub fn boot(
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
     fields: &'static [Field],
-    force_setup: bool,
     software_version: &str,
 ) -> anyhow::Result<Online> {
     let store = Store::new(nvs.clone());
+    let force_setup = store.get(key::SETUP_REQUESTED).is_some();
+    if force_setup {
+        store.remove(key::SETUP_REQUESTED)?;
+    }
     let mut wifi = Wifi::new(modem, sysloop, nvs)?;
     let setup_name = format!("spaces-setup-{}", short_id(&wifi.mac()?));
 
@@ -78,9 +114,7 @@ pub fn boot(
         None => {
             let invite = store.get(key::INVITE).unwrap_or_default();
             if invite.trim().is_empty() {
-                anyhow::bail!(
-                    "not registered and no invite saved; hold BOOT at power-on to enter one"
-                );
+                anyhow::bail!("not registered and no invite saved; hold BOOT for 3 s to enter one");
             }
             let server = store.get(key::SERVER).unwrap_or_default();
             let name = store.get(key::NAME).unwrap_or_else(|| setup_name.clone());

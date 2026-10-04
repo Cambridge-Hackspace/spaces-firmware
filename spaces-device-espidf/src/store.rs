@@ -20,8 +20,12 @@ pub mod key {
     pub const SERVER: &str = "server";
     pub const INVITE: &str = "invite";
     pub const BROKER: &str = "broker";
+    pub const BROKER_USER: &str = "broker_user";
+    pub const BROKER_PASS: &str = "broker_pass";
     pub const TOOL_ID: &str = "tool_id";
     pub const NAME: &str = "name";
+    /// Set by the BOOT-button watcher, read and cleared at the next boot.
+    pub const SETUP_REQUESTED: &str = "setup_req";
 }
 
 /// The settings every module needs. A particular firmware adds its own (the
@@ -65,6 +69,20 @@ pub const FIELDS: &[Field] = &[
         hint: "the edge's MQTT broker, e.g. mqtt://192.168.1.20:1883",
         secret: false,
         required: true,
+    },
+    Field {
+        key: key::BROKER_USER,
+        label: "Broker username",
+        hint: "this module's login on the local broker",
+        secret: false,
+        required: false,
+    },
+    Field {
+        key: key::BROKER_PASS,
+        label: "Broker password",
+        hint: "leave blank to keep the saved one",
+        secret: true,
+        required: false,
     },
     Field {
         key: key::TOOL_ID,
