@@ -1,6 +1,6 @@
 //! Joining a network, and hosting one for setup.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,13 +17,19 @@ use spaces_device::backoff::Backoff;
 /// This is esp-idf's default for an access point.
 pub const SETUP_ADDRESS: &str = "192.168.71.1";
 
-/// How long one attempt to join may take, scan included.
+/// How long one attempt to join may take, scan included. Most failures end an
+/// attempt well before this, with a disconnect: about 2.5 s for a network
+/// that is not there, about 4 s for one that refuses us.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Wifi {
     inner: BlockingWifi<EspWifi<'static>>,
     /// Set once joined: from then on a lost connection is rejoined at once.
     rejoin: Arc<AtomicBool>,
+    /// Disconnects so far, and the reason given for the latest: how an
+    /// attempt that has already failed finds out without waiting it out.
+    disconnects: Arc<AtomicU32>,
+    last_reason: Arc<AtomicU32>,
     _disconnects: EspSubscription<'static, System>,
 }
 
@@ -35,13 +41,19 @@ impl Wifi {
     ) -> anyhow::Result<Self> {
         let wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs))?;
         let rejoin = Arc::new(AtomicBool::new(false));
-        let disconnects = {
+        let disconnects = Arc::new(AtomicU32::new(0));
+        let last_reason = Arc::new(AtomicU32::new(0));
+        let subscription = {
             let rejoin = rejoin.clone();
+            let disconnects = disconnects.clone();
+            let last_reason = last_reason.clone();
             sysloop.subscribe::<WifiEvent, _>(move |event| {
                 if let WifiEvent::StaDisconnected(why) = event {
                     // The 802.11 reason code is the only clue to why a join
                     // failed or a link dropped, so it is always logged.
                     log::warn!("Wi-Fi disconnected, reason {}", why.reason());
+                    last_reason.store(why.reason().into(), Ordering::Relaxed);
+                    disconnects.fetch_add(1, Ordering::Release);
                     if rejoin.load(Ordering::Relaxed) {
                         // What esp-idf's own examples do. If the network is
                         // gone this fails after a scan of a few seconds and
@@ -59,7 +71,9 @@ impl Wifi {
         Ok(Wifi {
             inner: BlockingWifi::wrap(wifi, sysloop)?,
             rejoin,
-            _disconnects: disconnects,
+            disconnects,
+            last_reason,
+            _disconnects: subscription,
         })
     }
 
@@ -115,8 +129,17 @@ impl Wifi {
 
     fn try_once(&mut self) -> anyhow::Result<()> {
         let deadline = Instant::now() + ATTEMPT_TIMEOUT;
+        // Any disconnect from here on is this attempt failing. The driver
+        // does not try again by itself, so there is nothing to wait for.
+        let before = self.disconnects.load(Ordering::Acquire);
         self.inner.wifi_mut().connect()?;
         while !self.inner.is_connected()? {
+            if self.disconnects.load(Ordering::Acquire) != before {
+                anyhow::bail!(
+                    "disconnected, reason {}",
+                    self.last_reason.load(Ordering::Relaxed)
+                );
+            }
             if Instant::now() > deadline {
                 anyhow::bail!("timed out");
             }
