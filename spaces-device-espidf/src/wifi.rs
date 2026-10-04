@@ -1,27 +1,30 @@
 //! Joining a network, and hosting one for setup.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::eventloop::{EspSubscription, EspSystemEventLoop, System};
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
-    AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
+    AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
+    EspWifi, WifiEvent,
 };
+use spaces_device::backoff::Backoff;
 
 /// The address of the setup portal while the module is its own access point.
 /// This is esp-idf's default for an access point.
 pub const SETUP_ADDRESS: &str = "192.168.71.1";
 
-/// Association attempts before giving up and falling back to setup mode. One
-/// attempt is not enough evidence: a single transient auth timeout used to
-/// strand the traffic light in setup mode until someone power-cycled it.
-const ATTEMPTS: u32 = 3;
+/// How long one attempt to join may take, scan included.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
-const SETTLE: Duration = Duration::from_secs(2);
 
 pub struct Wifi {
     inner: BlockingWifi<EspWifi<'static>>,
+    /// Set once joined: from then on a lost connection is rejoined at once.
+    rejoin: Arc<AtomicBool>,
+    _disconnects: EspSubscription<'static, System>,
 }
 
 impl Wifi {
@@ -31,13 +34,41 @@ impl Wifi {
         nvs: EspDefaultNvsPartition,
     ) -> anyhow::Result<Self> {
         let wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs))?;
+        let rejoin = Arc::new(AtomicBool::new(false));
+        let disconnects = {
+            let rejoin = rejoin.clone();
+            sysloop.subscribe::<WifiEvent, _>(move |event| {
+                if let WifiEvent::StaDisconnected(why) = event {
+                    // The 802.11 reason code is the only clue to why a join
+                    // failed or a link dropped, so it is always logged.
+                    log::warn!("Wi-Fi disconnected, reason {}", why.reason());
+                    if rejoin.load(Ordering::Relaxed) {
+                        // What esp-idf's own examples do. If the network is
+                        // gone this fails after a scan of a few seconds and
+                        // lands back here, so it retries without spinning.
+                        // SAFETY: the driver is started; this only queues a
+                        // request with it.
+                        let err = unsafe { esp_idf_svc::sys::esp_wifi_connect() };
+                        if err != 0 {
+                            log::warn!("could not ask to rejoin: error {err}");
+                        }
+                    }
+                }
+            })?
+        };
         Ok(Wifi {
             inner: BlockingWifi::wrap(wifi, sysloop)?,
+            rejoin,
+            _disconnects: disconnects,
         })
     }
 
-    /// Join `ssid`. Returns the address we were given, or an error once every
-    /// attempt has failed.
+    /// Join `ssid`, trying for as long as it takes, and return the address we
+    /// were given. Once joined, a dropped connection is rejoined
+    /// automatically for as long as the module runs.
+    ///
+    /// Never gives up: see [`Backoff`] for why. Setup mode stays reachable
+    /// throughout by holding BOOT. Errors only if the driver itself fails.
     pub fn join(&mut self, ssid: &str, password: &str) -> anyhow::Result<String> {
         let config = ClientConfiguration {
             ssid: ssid
@@ -55,25 +86,31 @@ impl Wifi {
         };
         self.inner
             .set_configuration(&Configuration::Client(config))?;
-        self.inner.start()?;
 
-        for attempt in 1..=ATTEMPTS {
-            log::info!("joining {ssid} (attempt {attempt}/{ATTEMPTS})");
+        let mut failures = 0;
+        loop {
+            self.inner.start()?;
+            log::info!("joining {ssid} (attempt {})", failures + 1);
             match self.try_once() {
                 Ok(()) => {
                     let ip = self.inner.wifi().sta_netif().get_ip_info()?.ip;
                     log::info!("joined {ssid} as {ip}");
+                    self.rejoin.store(true, Ordering::Relaxed);
                     return Ok(ip.to_string());
                 }
-                Err(e) => log::warn!("attempt {attempt} failed: {e}"),
+                Err(e) => log::warn!("attempt {} failed: {e}", failures + 1),
             }
-            let _ = self.inner.disconnect();
-            // Seen on the bench: a connect issued straight after a failed
-            // attempt can sit for the whole timeout without even trying to
-            // authenticate. Give the driver a moment to settle first.
-            std::thread::sleep(SETTLE);
+            failures += 1;
+            // Stopped, not just disconnected. Seen on the bench: a connect
+            // issued after a failed attempt, even two seconds after a
+            // disconnect, sat for the whole timeout without scanning or
+            // authenticating. Restarting the driver clears whatever it was
+            // stuck on.
+            let _ = self.inner.stop();
+            let wait = Backoff::WIFI.after(failures);
+            log::info!("trying again in {} s", wait.as_secs());
+            std::thread::sleep(wait);
         }
-        anyhow::bail!("could not join {ssid} after {ATTEMPTS} attempts")
     }
 
     fn try_once(&mut self) -> anyhow::Result<()> {
@@ -91,6 +128,7 @@ impl Wifi {
 
     /// Become an open access point called `name`, for the setup portal.
     pub fn host(&mut self, name: &str) -> anyhow::Result<()> {
+        self.rejoin.store(false, Ordering::Relaxed);
         let config = AccessPointConfiguration {
             ssid: name
                 .try_into()

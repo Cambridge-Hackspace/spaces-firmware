@@ -6,8 +6,10 @@
 //! - [`wire`]: the messages a module exchanges with its edge, and their topics.
 //! - [`module`]: the state machine that decides what to do with them.
 //! - [`registration`]: claiming an invite.
+//! - [`backoff`]: how long to wait before trying again.
 //! - [`setup_page`] and [`form`]: a device's own setup page.
 
+pub mod backoff;
 pub mod form;
 pub mod module;
 pub mod registration;

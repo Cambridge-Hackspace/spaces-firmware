@@ -64,7 +64,8 @@ pub fn watch_setup_button(
 ///
 /// - No settings, or setup requested with [`watch_setup_button`]: run the
 ///   setup portal, then restart. Does not return.
-/// - Cannot join the network: fall back to the setup portal. Does not return.
+/// - Cannot join the network: keep trying, for as long as it takes. Holding
+///   BOOT still reaches setup meanwhile.
 /// - Not yet registered: claim the invite, and save what comes back before
 ///   anything else. If that fails the module cannot work, and says so.
 ///
@@ -98,13 +99,10 @@ pub fn boot(
 
     let ssid = store.get(key::WIFI_SSID).unwrap_or_default();
     let pass = store.get(key::WIFI_PASS).unwrap_or_default();
-    let address = match wifi.join(&ssid, &pass) {
-        Ok(address) => address,
-        Err(e) => {
-            log::warn!("{e}; falling back to setup");
-            setup(&mut wifi, &store, fields, &setup_name);
-        }
-    };
+    // Tries until it joins. Falling back to setup mode here would open an
+    // unsecured access point to anyone in range whenever the network went
+    // away for long enough; BOOT is the way into setup instead.
+    let address = wifi.join(&ssid, &pass)?;
 
     let credentials = match store.credentials() {
         Some(c) => {
