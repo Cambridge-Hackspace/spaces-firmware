@@ -37,27 +37,27 @@ automatically), `cargo install ldproxy --locked`, and
 
 ```sh
 cargo build --release
-cargo run --release      # build and flash over serial
+cargo run --release      # build and flash
 cargo test -p spaces-device --target x86_64-unknown-linux-gnu
 ```
 
 Flashing is configured from the environment; see the top of
-`scripts/cargo-runner.sh`. For example, from WSL through a Windows espflash, to
-a board already put into download mode by hand:
+`scripts/cargo-runner.sh`. For example, over the board's own USB port, from WSL
+through a Windows espflash:
 
 ```sh
-ESPFLASH=/path/to/espflash.exe ESPFLASH_PORT=COM10 ESPFLASH_BEFORE=no-reset \
+ESPFLASH=/path/to/espflash.exe ESPFLASH_PORT=COM13 ESPFLASH_BEFORE=usb-reset \
   cargo run --release
 ```
 
 ### The ESP32-C6 Super Mini
 
-The demo is built on this board, and flashing it the first time is not
-straightforward: it arrives blank, its own USB download mode did not work for
-us, and it has to be flashed over its serial pins while powered from a charger.
+The demo is built on this board, and flashing it the first time may not be
+straightforward: it arrives blank, its own USB did not answer us until it had
+firmware on it, and the fallback, its serial pins, has its own traps.
 **Read [docs/SUPER-MINI.md](docs/SUPER-MINI.md) before you start.** It is the
-condensed version of an evening spent finding that out, and every problem in it
-looked like a different problem at first.
+condensed version of the time spent finding that out, including two wrong
+conclusions, and every problem in it looked like a different problem at first.
 
 Once firmware with over-the-air updates is on the board, none of this is needed
 again.

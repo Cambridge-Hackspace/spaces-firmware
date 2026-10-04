@@ -24,10 +24,12 @@
 #   ESPFLASH         the espflash to run (default: espflash). Under WSL, a
 #                    Windows build such as espflash.exe works and is often the
 #                    only thing that can reach the port; paths are translated.
-#   ESPFLASH_PORT    the serial port, e.g. /dev/ttyUSB0 or COM10.
+#   ESPFLASH_PORT    the serial port, e.g. /dev/ttyACM0 or COM13 for the
+#                    board's own USB, /dev/ttyUSB0 or COM10 for an adapter.
 #   ESPFLASH_BEFORE  how to get the chip into its bootloader (default:
-#                    default-reset). Use no-reset when the board has been put
-#                    into download mode by hand.
+#                    default-reset). Use usb-reset over the board's own USB,
+#                    and no-reset when it has been put into download mode by
+#                    hand.
 
 set -euo pipefail
 
