@@ -9,12 +9,14 @@
 //!   worth metering.
 //! - [`registration`]: claiming an invite.
 //! - [`backoff`]: how long to wait before trying again.
+//! - [`input`]: buttons and switches, without the bounce.
 //! - [`status`]: what the status light shows.
 //! - [`weblog`]: the log, kept for a web page.
 //! - [`setup_page`] and [`form`]: a device's own setup page.
 
 pub mod backoff;
 pub mod form;
+pub mod input;
 pub mod module;
 pub mod registration;
 pub mod run_filter;

@@ -136,7 +136,7 @@ An ESP32-C6 Super Mini on a breadboard, and:
 | GPIO | Connect | Meaning |
 |---|---|---|
 | 18 | button to GND | Alice presents her card |
-| 19 | button to GND | Bob presents his |
+| 14 | button to GND | Bob presents his |
 | 20 | button to GND | Tool off |
 | 21 | switch to GND | the machine is running (a laser firing, say) |
 | 22 | resistor, then green LED, to GND | **Tool**: powered, authorized *and* leased |
