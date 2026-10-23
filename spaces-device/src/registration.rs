@@ -26,12 +26,22 @@ pub struct RegisterRequest {
 }
 
 impl RegisterRequest {
-    /// A request from a class 1 module that both reads cards and switches a
-    /// tool. `platform` is "other": it is not Windows, Linux or macOS.
+    /// A request declaring exactly the roles this device can actually perform.
     ///
-    /// To be given leases the device must also be bound to its tool in the
-    /// `power` role by an administrator; declaring the role here is not enough.
-    pub fn reader_and_power(
+    /// `platform` is "other": it is not Windows, Linux or macOS.
+    ///
+    /// **Declare only what the hardware does.** `capabilities.roles` is the
+    /// device's own claim about itself, and the server will let an
+    /// administrator bind it in any role it declares. A card reader with no
+    /// relay that claims `power` can therefore be bound as the thing that
+    /// switches a machine, and nothing downstream can tell that it cannot --
+    /// so the lie is discovered as a tool that never energizes.
+    ///
+    /// Declaring a role is also not the same as being given one: to receive
+    /// leases the device must be bound to its tool in the `power` role by an
+    /// administrator as well.
+    pub fn with_roles(
+        roles: &[&str],
         invite: &str,
         name: &str,
         mac_address: &str,
@@ -42,13 +52,36 @@ impl RegisterRequest {
             device_code: invite.to_string(),
             name: name.to_string(),
             capabilities: Capabilities {
-                roles: vec!["reader".into(), "power".into()],
+                roles: roles.iter().map(|r| (*r).to_string()).collect(),
             },
             mac_address: mac_address.to_string(),
             software_version: software_version.to_string(),
             platform: "other".into(),
             ipv4_address,
         }
+    }
+
+    /// A request from a class 1 module that both reads cards and switches a
+    /// tool -- the demo module's shape.
+    ///
+    /// Kept as the named case because it is the one a power module wants, and
+    /// because it reads better at the call site than a two-element array. It is
+    /// [`Self::with_roles`] with `["reader", "power"]`.
+    pub fn reader_and_power(
+        invite: &str,
+        name: &str,
+        mac_address: &str,
+        software_version: &str,
+        ipv4_address: Option<String>,
+    ) -> Self {
+        Self::with_roles(
+            &["reader", "power"],
+            invite,
+            name,
+            mac_address,
+            software_version,
+            ipv4_address,
+        )
     }
 }
 
@@ -129,6 +162,47 @@ mod tests {
         assert_eq!(v["capabilities"]["roles"], json!(["reader", "power"]));
         assert_eq!(v["platform"], "other");
         assert!(v.get("ipv4_address").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn a_reader_only_device_declares_only_reader() {
+        // The case boot() could not express until it took `roles`: a badge
+        // reader with no relay. Declaring `power` here would let an
+        // administrator bind it as the thing that switches a machine, and the
+        // mistake would surface as a tool that never energizes.
+        let r = RegisterRequest::with_roles(
+            &["reader"],
+            "INV",
+            "reader-01",
+            "02:00:00:00:00:02",
+            "0.1.0",
+            None,
+        );
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["capabilities"]["roles"], json!(["reader"]));
+    }
+
+    #[test]
+    fn the_named_constructor_still_declares_both() {
+        // The control for the delegation: reader_and_power is now with_roles in
+        // a wrapper, so this pins that the wrapper did not change what it sends.
+        // Without it, a bad delegation would only be caught by whichever
+        // firmware registered next -- once, on real hardware, with a spent
+        // invite.
+        let a = RegisterRequest::reader_and_power("INV", "d", "02:00:00:00:00:01", "0.1.0", None);
+        let b = RegisterRequest::with_roles(
+            &["reader", "power"],
+            "INV",
+            "d",
+            "02:00:00:00:00:01",
+            "0.1.0",
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::to_value(&b).unwrap(),
+            "reader_and_power must be exactly with_roles([reader, power])"
+        );
     }
 
     #[test]

@@ -199,9 +199,12 @@ Keep the module's log open, at `http://<the module>/log` or over USB with
    firmware, and keeps it once it is back on the broker. *An update that cannot
    get back to the broker is undone by itself, three minutes later.*
 
-One module per broker, for now: replies to `tool-on` do not say whose they
-are, so two modules on one broker can take each other's answers. See
-[docs/FINDINGS.md](docs/FINDINGS.md), finding 7.
+Several modules on one broker, as of CS:S #166: the edge echoes `tool_id` in a
+`tool-on` reply and a module drops an answer about another tool before reading
+its verdict. **Against an edge without #166 it is still one module per broker** —
+such an edge names no tool, and all a module has then is the five-second
+single-outstanding-request window, which narrows the race without closing it.
+See [docs/FINDINGS.md](docs/FINDINGS.md), finding 7.
 
 ## License
 

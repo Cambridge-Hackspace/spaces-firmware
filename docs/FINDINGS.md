@@ -119,6 +119,15 @@ request outstanding, for at most five seconds. That narrows the window; it
 does not close it. A fix needs the protocol: echo the `card` and `tool_id` in
 the reply, or better a request id the module chooses.
 
+**FIXED UPSTREAM, 2026-10-23 — CS:S #166.** The edge now echoes `tool_id` in
+the tool-on reply, which is what the paragraph above asked for, and
+`ToolOnReply::is_for` drops a reply naming another tool before the verdict is
+read. The bound is worth stating exactly: the protocol gap is closed **against
+an edge carrying #166**, and an older edge sends no `tool_id` at all, where the
+absent field falls back to the five-second single-request window above. So the
+weaker guard is still load-bearing and stays. The door half of the same model
+had always echoed `door_id`; the tool half simply never did.
+
 Related: `toolguard/request/tool-on` carries no `device_id` either, so the edge
 cannot tell which module asked, only which tool.
 

@@ -309,6 +309,31 @@ impl Module {
 
     fn on_reply(&mut self, payload: &[u8], now: u64, out: &mut Vec<Action>) {
         let reply: Option<ToolOnReply> = serde_json::from_slice(payload).ok();
+
+        // IS IT MINE, BEFORE IS IT YES (CS:S #166). Every module on the local
+        // broker receives every answer on this topic -- it is unnamespaced and
+        // names no device -- so a neighbour's verdict arrives here looking
+        // exactly like ours. Until the edge echoed `tool_id` the only defence
+        // was the narrow window below; now a reply that names another tool is
+        // dropped outright.
+        //
+        // THE PHASE DOES NOT CHANGE. Staying in `Asking` is the point: our own
+        // answer may still be in flight, and treating a neighbour's reply as a
+        // refusal would deny a member for someone else's swipe. If ours never
+        // comes, the reply timeout already turns that into a no.
+        if let Some(r) = &reply {
+            if !r.is_for(&self.config.tool_id) {
+                if matches!(self.phase, Phase::Asking { .. }) {
+                    out.push(Action::Note(format!(
+                        "ignoring a tool-on answer about {} -- this module asked about {}",
+                        r.tool_id.as_deref().unwrap_or("?"),
+                        self.config.tool_id
+                    )));
+                }
+                return;
+            }
+        }
+
         match &self.phase {
             Phase::Asking { card, .. } => {
                 let card = card.clone();

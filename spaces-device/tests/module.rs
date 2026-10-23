@@ -555,3 +555,98 @@ fn running_goes_off_before_the_tool_and_on_after_it() {
         .unwrap();
     assert!(running_off < tool_off);
 }
+
+// ------------------------------------------- whose answer is this? (CS:S #166)
+//
+// `toolguard/response/tool-on` is unnamespaced and names no device, so every
+// module on a local broker receives every answer. Before the edge echoed
+// `tool_id` there was nothing in the payload to match on, and the only defence
+// was the reply window: accept an answer while exactly one request is
+// outstanding. That narrows the race and cannot close it -- which is why
+// README.md said "one module per broker, for now".
+//
+// These four arms are the two halves of the filter and its two fallbacks.
+
+/// A yes that names a tool explicitly.
+fn yes_for(tool: &str) -> Vec<u8> {
+    json!({"tool_id": tool, "authorized": true, "reason": "authorized"})
+        .to_string()
+        .into_bytes()
+}
+
+#[test]
+fn a_yes_for_another_tool_does_not_start_a_session_here() {
+    let mut m = module();
+    m.swipe(ALICE, 0);
+
+    m.message(topic::TOOL_ON_RESPONSE, &yes_for("drill-07"), 100);
+
+    // THE LEASE IS WHAT MAKES THIS ARM DISCRIMINATE, and leaving it out made the
+    // test a tautology -- caught by disabling the filter and watching it still
+    // pass. `tool_is_on()` is false after a bare yes whatever the filter does,
+    // because a session waits for a lease before energizing. So the stray yes
+    // has to be followed by a lease: with the filter there is no session for the
+    // lease to apply to, and without one the tool comes on for a swipe that
+    // happened at another machine.
+    let actions = m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+
+    assert!(
+        !m.tool_is_on(),
+        "a yes addressed to drill-07, plus a lease, switched this module's tool on \
+         -- this is the defect: one broker, several readers, and a neighbour's \
+         verdict energizing the wrong machine"
+    );
+    assert!(
+        publishes_to(&actions).is_empty(),
+        "a lease with no session of our own should publish nothing, got {:?}",
+        publishes_to(&actions)
+    );
+}
+
+#[test]
+fn and_our_own_answer_still_arrives_afterwards() {
+    // The control for the arm above, and the reason the phase must not change:
+    // a neighbour's reply must not be treated as a refusal either, or their
+    // swipe denies our member.
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes_for("drill-07"), 100);
+
+    m.message(topic::TOOL_ON_RESPONSE, &yes_for(TOOL), 200);
+    m.message(topic::LEASE, &lease(ME, true, 3000), 300);
+
+    assert!(
+        m.tool_is_on(),
+        "after ignoring a reply for another tool, our own yes was not honoured -- \
+         the filter dropped the request instead of the stray answer"
+    );
+}
+
+#[test]
+fn a_yes_naming_our_tool_is_accepted() {
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes_for(TOOL), 100);
+    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+    assert!(
+        m.tool_is_on(),
+        "a yes naming this module's own tool was refused"
+    );
+}
+
+#[test]
+fn a_yes_naming_no_tool_is_still_accepted() {
+    // An edge predating CS:S #166 sends no `tool_id`. Refusing those would
+    // brick every module against an edge that has not been updated, so the
+    // absent case falls back to the reply window. Stated as a test because it
+    // is a deliberate hole, not an oversight: see ToolOnReply::is_for.
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+    assert!(
+        m.tool_is_on(),
+        "a reply with no tool_id was dropped, which would break every module \
+         talking to an edge from before the echo existed"
+    );
+}

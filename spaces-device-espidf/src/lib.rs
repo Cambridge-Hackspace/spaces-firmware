@@ -73,6 +73,23 @@ pub fn watch_setup_button(
     Ok(())
 }
 
+/// What a firmware is: the settings it needs, what its hardware can do, and
+/// which build it is.
+///
+/// These three travelled as three more parameters of [`boot`] until adding
+/// `roles` took it to eight and clippy refused it at `8/7` — correctly, since
+/// eight positional arguments at a call site is a row of values whose meaning
+/// depends on their order. They are one cluster and now say so: every field is
+/// consulted on the single registration call a module makes in its life.
+pub struct Firmware<'a> {
+    /// The settings schema, for the setup page and for NVS.
+    pub fields: &'static [Field],
+    /// The roles this device's hardware can actually perform. See [`boot`].
+    pub roles: &'a [&'a str],
+    /// This build, reported at registration.
+    pub software_version: &'a str,
+}
+
 /// Get the module online and registered, or into setup mode trying.
 ///
 /// - No settings, or setup requested with [`watch_setup_button`]: run the
@@ -86,15 +103,33 @@ pub fn watch_setup_button(
 /// boot-reset, module-state and power-state to the edge: boot-reset in
 /// particular is global, and a module calling it would end every session in
 /// the building whenever it restarted.
+///
+/// `Firmware::roles` is what this device tells the platform it can do, and it
+/// has no default on purpose. It was `["reader", "power"]` for every firmware
+/// default on purpose. It was `["reader", "power"]` for every firmware until a
+/// badge reader needed to register, and a wrong value here is not a local
+/// mistake: the server lets an administrator bind the device in any role it
+/// declares, so a reader with no relay that claims `power` can be made the
+/// thing that switches a machine. That failure surfaces as a tool which never
+/// energizes, at the far end of the system from the lie. Pass what the hardware
+/// actually does -- `&["reader", "power"]` for a module that switches a tool,
+/// `&["reader"]` for one that only reads cards.
+///
+/// Roles are consulted only on the single registration call a module makes in
+/// its life; a device that is already registered ignores them.
 pub fn boot(
     modem: Modem<'static>,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
-    fields: &'static [Field],
-    software_version: &str,
+    firmware: Firmware<'_>,
     light: StatusLight,
     updates: Updates,
 ) -> anyhow::Result<Online> {
+    let Firmware {
+        fields,
+        roles,
+        software_version,
+    } = firmware;
     let store = Store::new(nvs.clone());
     let force_setup = store.get(key::SETUP_REQUESTED).is_some();
     if force_setup {
@@ -146,7 +181,8 @@ pub fn boot(
             }
             let server = store.get(key::SERVER).unwrap_or_default();
             let name = store.get(key::NAME).unwrap_or_else(|| setup_name.clone());
-            let request = RegisterRequest::reader_and_power(
+            let request = RegisterRequest::with_roles(
+                roles,
                 invite.trim(),
                 &name,
                 &wifi.mac()?,

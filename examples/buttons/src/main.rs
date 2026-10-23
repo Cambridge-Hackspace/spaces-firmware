@@ -111,8 +111,14 @@ fn main() -> anyhow::Result<()> {
         peripherals.modem,
         sysloop,
         nvs,
-        fields,
-        version,
+        spaces_device_espidf::Firmware {
+            fields,
+            // This demo reads cards AND switches a tool, so it declares both. A
+            // reader with no relay declares &["reader"] -- see boot()'s own note
+            // on why claiming a role the hardware cannot do fails far from here.
+            roles: &["reader", "power"],
+            software_version: version,
+        },
         light.clone(),
         updates,
     ) {
