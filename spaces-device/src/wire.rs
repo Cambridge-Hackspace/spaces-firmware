@@ -79,8 +79,18 @@ pub struct PowerReport {
 /// as the only yes. The edge actually sends `{"authorized": …, "reason": …}`.
 /// Both fields are read, so this works with the edge as built and with the
 /// document as written; see [`ToolOnReply::is_yes`] for how they combine.
+///
+/// Since CS:S #166 the edge also echoes `tool_id`, which is the only thing that
+/// makes a reply addressable: these topics are unnamespaced and carry no device
+/// id, so every module on the broker receives every answer. See
+/// [`ToolOnReply::is_for`].
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ToolOnReply {
+    /// The tool this is an answer about, echoed by the edge (CS:S #166).
+    ///
+    /// `None` from an edge predating that, where there is nothing to match on.
+    #[serde(default)]
+    pub tool_id: Option<String>,
     #[serde(default)]
     pub authorized: Option<bool>,
     #[serde(default)]
@@ -104,6 +114,26 @@ impl ToolOnReply {
         let said_no = self.authorized == Some(false) || self.tool_on == Some(false);
         let said_yes = self.authorized == Some(true) || self.tool_on == Some(true);
         said_yes && !said_no
+    }
+
+    /// Whether this reply is an answer about `tool_id` — ours, or a neighbour's.
+    ///
+    /// **Not a permission test.** It answers "is this mine", which has to be
+    /// settled before `is_yes` is even asked: without it, a yes for the machine
+    /// next door starts a session here, and that is a real arrangement rather
+    /// than a hypothetical — one local broker, several readers, and a reply that
+    /// named nothing until CS:S #166.
+    ///
+    /// An absent `tool_id` returns `true`, which is the honest answer for an
+    /// edge that does not send one: nothing can be ruled out, so the module
+    /// falls back to the weaker guard it has always had — accept a reply only
+    /// while exactly one request is outstanding, and only for a short window.
+    /// That is why this is not sufficient on its own and the timeout stays.
+    pub fn is_for(&self, tool_id: &str) -> bool {
+        match self.tool_id.as_deref() {
+            None => true,
+            Some(named) => named == tool_id,
+        }
     }
 
     /// Something to show a human, from whichever field the sender filled in.
