@@ -112,6 +112,10 @@ fn main() -> anyhow::Result<()> {
         sysloop,
         nvs,
         fields,
+        // This demo reads cards AND switches a tool, so it declares both. A
+        // reader with no relay declares &["reader"] -- see boot()'s own note on
+        // why claiming a role the hardware cannot do fails far from here.
+        &["reader", "power"],
         version,
         light.clone(),
         updates,

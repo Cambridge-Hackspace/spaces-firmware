@@ -86,11 +86,26 @@ pub fn watch_setup_button(
 /// boot-reset, module-state and power-state to the edge: boot-reset in
 /// particular is global, and a module calling it would end every session in
 /// the building whenever it restarted.
+/// Boot a module: storage, setup portal, Wi-Fi, registration, update server.
+///
+/// `roles` is what this device tells the platform it can do, and it has no
+/// default on purpose. It was `["reader", "power"]` for every firmware until a
+/// badge reader needed to register, and a wrong value here is not a local
+/// mistake: the server lets an administrator bind the device in any role it
+/// declares, so a reader with no relay that claims `power` can be made the
+/// thing that switches a machine. That failure surfaces as a tool which never
+/// energizes, at the far end of the system from the lie. Pass what the hardware
+/// actually does -- `&["reader", "power"]` for a module that switches a tool,
+/// `&["reader"]` for one that only reads cards.
+///
+/// Roles are consulted only on the single registration call a module makes in
+/// its life; a device that is already registered ignores them.
 pub fn boot(
     modem: Modem<'static>,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
     fields: &'static [Field],
+    roles: &[&str],
     software_version: &str,
     light: StatusLight,
     updates: Updates,
@@ -146,7 +161,8 @@ pub fn boot(
             }
             let server = store.get(key::SERVER).unwrap_or_default();
             let name = store.get(key::NAME).unwrap_or_else(|| setup_name.clone());
-            let request = RegisterRequest::reader_and_power(
+            let request = RegisterRequest::with_roles(
+                roles,
                 invite.trim(),
                 &name,
                 &wifi.mac()?,
