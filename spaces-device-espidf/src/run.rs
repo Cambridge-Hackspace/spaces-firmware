@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use esp_idf_svc::mqtt::client::{
     Details, EspMqttClient, EventPayload, MqttClientConfiguration, QoS,
 };
-use spaces_device::module::{Action, Config, Module, Output};
+use spaces_device::module::{Action, Config, Module, Outcome, Output};
 use spaces_device::wire::topic;
 
 use crate::status_light::Status;
@@ -187,6 +187,29 @@ fn apply(
                 }
             }
             Action::Note(text) => log::info!("{text}"),
+            // Updates wait for a session to close, and the SESSION is the right
+            // signal for that -- not the relay.
+            //
+            // This used to ride on `Set { Tool, .. }` alone, which was correct
+            // only while every module had a relay. A device that gates nothing
+            // emits no Tool action, so it would have had no session guard at
+            // all: an OTA could reboot a badge reader mid-session, and the
+            // device that came back up would know nothing about the session it
+            // had opened, leaving the tool `in_use` with nobody to release it.
+            //
+            // Both paths are kept, because a plug has no outcomes to report --
+            // it owns no session, and its relay state is the nearest thing it
+            // has to one. Where both fire they agree, and the outcome fires
+            // first: in_session goes true at authorization rather than at
+            // energize, which is earlier and so the safer side to err on.
+            Action::Outcome(outcome) => {
+                log::info!("{outcome:?}");
+                match outcome {
+                    Outcome::Authorized => updates.set_in_session(true),
+                    Outcome::Ended(_) => updates.set_in_session(false),
+                    Outcome::Refused(_) | Outcome::NoAnswer => {}
+                }
+            }
         }
     }
 }

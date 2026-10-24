@@ -79,6 +79,48 @@ pub enum Action {
     },
     /// Something worth telling the person watching the serial console.
     Note(String),
+    /// Something worth telling the person standing at the machine.
+    ///
+    /// Separate from [`Action::Note`] on purpose. A note is prose for a log and
+    /// its wording is not a contract; this is a decision a panel has to render,
+    /// and a display that scraped a log line for the verdict would break the
+    /// first time somebody improved the sentence.
+    Outcome(Outcome),
+}
+
+/// What just happened, for a display.
+///
+/// Transient: each is emitted once, when it happens. What the module is *doing*
+/// — resting, waiting, in a session — is [`Module::activity`] instead, because a
+/// panel needs both and they answer different questions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// An explicit yes. The session is open; on a device that gates power the
+    /// tool is not energized until a lease arrives.
+    Authorized,
+    /// A no, with the edge's own words for it. **Display this, do not branch on
+    /// it** — the strings are not part of the contract.
+    Refused(String),
+    /// Nothing answered in time, which is a no that is nobody's fault. Worth
+    /// distinguishing on a panel: a member told "access denied" checks their
+    /// training, where one told "no answer" checks the network.
+    NoAnswer,
+    /// The session ended, and why.
+    Ended(EndReason),
+}
+
+/// What the module is doing, for a display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// No session, nothing outstanding.
+    Idle,
+    /// A tool-on request is out and its answer has not arrived.
+    Asking,
+    /// A session is open. `energized` is whether the output is actually on,
+    /// which is a different question: a device that gates power is authorized
+    /// but dark until a lease arrives, and one that switches nothing is never
+    /// energized at all.
+    Session { energized: bool },
 }
 
 /// What a module needs to know about itself.
@@ -378,6 +420,21 @@ impl Module {
         self.running_on
     }
 
+    /// What this module is doing, for a panel to render.
+    ///
+    /// A plug reports [`Activity::Idle`] whatever its relay is doing: it owns
+    /// no session, so it has no activity in this sense. Ask
+    /// [`Module::tool_is_on`] about its relay.
+    pub fn activity(&self) -> Activity {
+        match &self.phase {
+            Phase::Idle { .. } => Activity::Idle,
+            Phase::Asking { .. } => Activity::Asking,
+            Phase::Session(_) => Activity::Session {
+                energized: self.tool_on,
+            },
+        }
+    }
+
     /// Call once at start-up, after connecting. Puts both outputs in a known
     /// off state and sends the first heartbeat at once rather than a second
     /// later.
@@ -568,6 +625,7 @@ impl Module {
                 out.push(Action::Note(format!(
                     "no answer about card {card}: refused (a timeout is a no)"
                 )));
+                out.push(Action::Outcome(Outcome::NoAnswer));
                 self.phase = Phase::Idle {
                     abandoned: Some((card, now)),
                 };
@@ -684,6 +742,7 @@ impl Module {
                         out.push(Action::Note(format!(
                             "card {card} authorized; waiting for a lease before switching on"
                         )));
+                        out.push(Action::Outcome(Outcome::Authorized));
                         self.phase = Phase::Session(Session {
                             card,
                             authorized_at: now,
@@ -703,11 +762,20 @@ impl Module {
                             "card {card} refused: {}",
                             reply.explanation()
                         )));
+                        out.push(Action::Outcome(Outcome::Refused(
+                            reply.explanation().to_string(),
+                        )));
                         self.phase = Phase::Idle { abandoned: None };
                     }
                     None => {
                         out.push(Action::Note(format!(
                             "card {card} refused: the answer did not parse"
+                        )));
+                        // Our own words: there is no reply to quote. Still a
+                        // refusal, per rule 2 -- an answer that does not parse
+                        // is not a yes.
+                        out.push(Action::Outcome(Outcome::Refused(
+                            "unreadable answer".to_string(),
                         )));
                         self.phase = Phase::Idle { abandoned: None };
                     }
@@ -824,6 +892,10 @@ impl Module {
             out.push(self.usage_action(&card, d_held, d_raw));
         }
         out.push(self.request(topic::TOOL_OFF_REQUEST, &card));
+        // After the release, not before: the panel saying "session ended" while
+        // the tool is still energized is the one ordering a member could act on
+        // and be wrong about.
+        out.push(Action::Outcome(Outcome::Ended(why)));
     }
 
     /// Bring the outputs, and the running clock, into line with the state.

@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 use spaces_device::wire::topic;
-use spaces_device::{Action, Config, Module, Output};
+use spaces_device::{Action, Activity, Config, EndReason, Module, Outcome, Output};
 
 const ME: &str = "dev-uuid-me";
 const TOOL: &str = "laser-01";
@@ -1219,4 +1219,134 @@ fn a_plug_still_heartbeats_with_its_relay_state() {
     let report = &published(&out, topic::POWER_REPORT)[0];
     assert_eq!(report["device_id"], ME);
     assert_eq!(report["relay_on"], false);
+}
+
+// ------------------------------------------- what a panel is told (Outcome)
+//
+// A display needs a decision it can render, not prose for a log. These are
+// separate from `Action::Note` so that improving a log sentence cannot change
+// what a member sees.
+
+fn outcomes(actions: &[Action]) -> Vec<Outcome> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Outcome(o) => Some(o.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_yes_tells_the_panel_the_member_is_authorized() {
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    assert_eq!(outcomes(&out), vec![Outcome::Authorized]);
+}
+
+#[test]
+fn a_refusal_carries_the_edges_own_words_to_the_panel() {
+    let mut m = module();
+    m.swipe(BOB, 0);
+    let out = m.message(
+        topic::TOOL_ON_RESPONSE,
+        br#"{"authorized":false,"reason":"Training required"}"#,
+        100,
+    );
+    assert_eq!(
+        outcomes(&out),
+        vec![Outcome::Refused("Training required".to_string())],
+        "the panel must be able to show the reason without parsing a log line"
+    );
+}
+
+#[test]
+fn an_unreadable_answer_is_a_refusal_and_not_a_silence() {
+    // Rule 2: an answer that does not parse is a no. It must not read as
+    // NoAnswer, because the two send a member to different places -- a refusal
+    // to their training record, a silence to the network.
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::TOOL_ON_RESPONSE, b"yes please", 100);
+    assert_eq!(
+        outcomes(&out),
+        vec![Outcome::Refused("unreadable answer".to_string())]
+    );
+}
+
+#[test]
+fn nothing_answering_is_reported_as_a_silence_not_a_refusal() {
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    let out = m.tick(5_000);
+    assert_eq!(outcomes(&out), vec![Outcome::NoAnswer]);
+}
+
+#[test]
+fn the_end_of_a_session_is_announced_after_the_tool_is_released() {
+    // Order matters: a panel saying "session ended" while the tool is still
+    // energized is the one instruction a member could act on and be hurt by.
+    let mut m = alice_running_tool();
+    let out = m.tool_off(1_000);
+    assert_eq!(outcomes(&out), vec![Outcome::Ended(EndReason::ToolOff)]);
+    let last_publish = out
+        .iter()
+        .rposition(|a| matches!(a, Action::Publish { .. }))
+        .expect("a release should have been published");
+    let announced = out
+        .iter()
+        .position(|a| matches!(a, Action::Outcome(Outcome::Ended(_))))
+        .expect("the end should have been announced");
+    assert!(
+        announced > last_publish,
+        "the panel was told before the tool was released: {out:?}"
+    );
+}
+
+#[test]
+fn the_end_reason_reaches_the_panel_so_it_can_say_which_stop_it_was() {
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.max_session_ms = 30_000;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    let out = m.tick(30_100);
+    assert_eq!(outcomes(&out), vec![Outcome::Ended(EndReason::MaxSession)]);
+}
+
+#[test]
+fn activity_distinguishes_resting_asking_and_in_session() {
+    let mut m = module();
+    assert_eq!(m.activity(), Activity::Idle);
+    m.swipe(ALICE, 0);
+    assert_eq!(m.activity(), Activity::Asking);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    assert_eq!(
+        m.activity(),
+        Activity::Session { energized: false },
+        "authorized is not energized: a power module waits for a lease"
+    );
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 200);
+    assert_eq!(m.activity(), Activity::Session { energized: true });
+}
+
+#[test]
+fn a_device_that_switches_nothing_is_in_session_but_never_energized() {
+    let m = alice_reading(no_power());
+    assert_eq!(
+        m.activity(),
+        Activity::Session { energized: false },
+        "a device with no relay reported an energized tool"
+    );
+}
+
+#[test]
+fn a_plug_has_no_activity_of_its_own() {
+    // It owns no session; its relay is `tool_is_on`. A panel on a plug would
+    // be showing the tool's state, not a member's session.
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    assert!(m.tool_is_on());
+    assert_eq!(m.activity(), Activity::Idle);
 }

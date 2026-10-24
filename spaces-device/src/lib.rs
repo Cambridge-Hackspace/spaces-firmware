@@ -23,5 +23,5 @@ pub mod status;
 pub mod weblog;
 pub mod wire;
 
-pub use module::{Action, Config, Module, Output};
+pub use module::{Action, Activity, Config, EndReason, Module, Outcome, Output};
 pub use run_filter::RunFilter;
