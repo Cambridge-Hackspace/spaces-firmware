@@ -650,3 +650,254 @@ fn a_yes_naming_no_tool_is_still_accepted() {
          talking to an edge from before the echo existed"
     );
 }
+
+// ------------------------------------------------- the two usage figures (#169)
+//
+// A module that senses its machine reports two durations: the HELD figure, with
+// gaps bridged, as `seconds`; and the RAW asserted time as `active_seconds`. The
+// case they exist for is a laser, whose enable line drops on every scan-line
+// return -- so on one engrave the two differ by 30-50% and only the server knows
+// which one should bill.
+
+/// A module that senses the machine, with the filter and reporter configured.
+fn sensing(assert_ms: u32, hold_ms: u32, interval_ms: u64) -> Module {
+    let mut c = Config::new(ME, TOOL);
+    c.use_assert_ms = assert_ms;
+    c.use_hold_ms = hold_ms;
+    c.senses_running = true;
+    c.usage_interval_ms = interval_ms;
+    let mut m = Module::new(c);
+    m.start(0);
+    m
+}
+
+/// Alice authorized at 100 and leased at 200 for ten minutes, so the lease is
+/// never what ends these tests.
+fn alice_on(mut m: Module) -> Module {
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::LEASE, &lease(ME, true, 600_000), 200);
+    assert!(m.tool_is_on(), "setup: the tool should be on");
+    m
+}
+
+fn logs(actions: &[Action]) -> Vec<Value> {
+    published(actions, topic::TOOL_LOG_REQUEST)
+}
+
+#[test]
+fn a_module_that_senses_nothing_omits_the_active_figure() {
+    // The default. Absent and zero mean different things to the server: absent
+    // falls back to the billable figure, zero bills nothing. A module with no
+    // sensor reporting 0.0 would make every session on a working-time-billed
+    // tool free, which is why this is a config flag and not an accumulator
+    // that happens to be empty.
+    let mut m = alice_running_tool();
+    m.running(true, 1000);
+    let out = m.tool_off(2000);
+    let log = &logs(&out)[0];
+    assert_eq!(log["seconds"], json!(1.0));
+    assert!(
+        log.get("active_seconds").is_none(),
+        "a module with no sensor claimed to have measured the machine: {log}"
+    );
+}
+
+#[test]
+fn a_sensing_module_reports_both_figures() {
+    let mut m = alice_on(sensing(0, 0, 0));
+    m.running(true, 1000);
+    let out = m.tool_off(2000);
+    let log = &logs(&out)[0];
+    assert_eq!(log["seconds"], json!(1.0));
+    assert_eq!(
+        log["active_seconds"],
+        json!(1.0),
+        "with no hold the two figures are the same, and both must be sent"
+    );
+}
+
+/// The defect the whole feature exists for, as a waveform: four scan-line
+/// passes with the beam off between them. The held figure is the job; the raw
+/// figure is the beam.
+#[test]
+fn the_held_figure_bridges_the_scan_line_gaps_and_the_raw_one_does_not() {
+    let mut m = alice_on(sensing(0, 5_000, 0));
+    m.running(true, 1_000);
+    m.running(false, 1_400); // pass: 400 ms
+    m.running(true, 1_600); // gap: 200 ms, bridged
+    m.running(false, 2_000); // pass: 400 ms
+    let out = m.tool_off(3_000);
+    let log = &logs(&out)[0];
+    assert_eq!(
+        log["seconds"],
+        json!(2.0),
+        "the held figure should span 1000..3000 as one job"
+    );
+    assert_eq!(
+        log["active_seconds"],
+        json!(0.8),
+        "the raw figure should be the two 400 ms passes and nothing else"
+    );
+}
+
+/// Without this the Running output strobes at scan-line rate and the accumulator
+/// records a job as hundreds of fragments. Asserted on the output, because that
+/// is the half a person at the machine sees.
+#[test]
+fn a_bridged_gap_does_not_strobe_the_running_output() {
+    let mut m = alice_on(sensing(0, 5_000, 0));
+    m.running(true, 1_000);
+    let out = m.running(false, 1_400);
+    assert!(
+        !out.iter().any(|a| matches!(
+            a,
+            Action::Set {
+                output: Output::Running,
+                on: false
+            }
+        )),
+        "the Running output was cut during a scan-line return: {out:?}"
+    );
+    assert!(m.running_is_on());
+}
+
+#[test]
+fn a_hold_that_expires_with_no_further_sample_ends_usage() {
+    // Nothing reports the end of a job: the signal simply stops. Without the
+    // filter being ticked on the way through `advance`, usage would run until
+    // somebody next touched the tool.
+    let mut m = alice_on(sensing(0, 1_000, 0));
+    m.running(true, 1_000);
+    m.running(false, 2_000);
+    m.tick(2_999);
+    assert!(m.running_is_on(), "the hold ended early");
+    m.tick(3_000);
+    assert!(!m.running_is_on(), "the hold never expired");
+    let out = m.tool_off(4_000);
+    assert_eq!(
+        logs(&out)[0]["seconds"],
+        json!(2.0),
+        "usage should end when the hold did, not when the tool was released"
+    );
+}
+
+#[test]
+fn periodic_reports_are_increments_that_sum_to_the_total_exactly_once() {
+    // Reports accumulate server-side, so a module that re-sent the running
+    // total would be billed the sum of a series instead of its last term.
+    let mut m = alice_on(sensing(0, 0, 1_000));
+    let mut all: Vec<Value> = Vec::new();
+    m.running(true, 1_000);
+    for t in [2_000, 3_000] {
+        all.extend(logs(&m.tick(t)));
+    }
+    m.running(false, 3_500);
+    all.extend(logs(&m.tool_off(4_000)));
+
+    assert_eq!(
+        all.len(),
+        3,
+        "expected two periodic reports and a final one"
+    );
+    let sum: f64 = all.iter().map(|l| l["seconds"].as_f64().unwrap()).sum();
+    assert!(
+        (sum - 2.5).abs() < 1e-9,
+        "the increments sum to {sum}, not the 2.5 s the machine ran: {all:?}"
+    );
+    let active: f64 = all
+        .iter()
+        .map(|l| l["active_seconds"].as_f64().unwrap())
+        .sum();
+    assert!(
+        (active - 2.5).abs() < 1e-9,
+        "the active increments sum to {active}, not 2.5: {all:?}"
+    );
+}
+
+#[test]
+fn the_final_report_carries_only_what_the_periodic_ones_did_not() {
+    // The other side of the same claim: proving the sum is right does not prove
+    // the last report is an increment rather than a coincidence.
+    //
+    // The timings matter. `running(false)` and `tool_off` both run `advance`,
+    // so either can publish a due increment -- these are chosen so the interval
+    // is NOT due at those calls and the remainder can only come from `end`.
+    let mut m = alice_on(sensing(0, 0, 1_000));
+    m.running(true, 1_000);
+    let periodic = logs(&m.tick(2_000));
+    assert_eq!(periodic[0]["seconds"], json!(1.0), "{periodic:?}");
+    m.running(false, 2_500); // 1.5 s run, 0.5 s of it unreported
+    let out = m.tool_off(2_600);
+    assert_eq!(
+        logs(&out)[0]["seconds"],
+        json!(0.5),
+        "the final report resent time the periodic one had already reported"
+    );
+}
+
+#[test]
+fn a_session_that_reported_everything_already_does_not_add_a_zero() {
+    // With a periodic report landing exactly at the end there is nothing left
+    // to say. Sending the zero would be harmless to the server's accumulation
+    // and pure noise on the broker, so it is suppressed -- but only because
+    // something was reported. See the test below for the other case.
+    let mut m = alice_on(sensing(0, 0, 1_000));
+    m.running(true, 1_000);
+    m.running(false, 2_000);
+    let reported = logs(&m.tick(3_000));
+    assert_eq!(reported.len(), 1, "setup: expected one periodic report");
+    let out = m.tool_off(3_100);
+    assert!(
+        logs(&out).is_empty(),
+        "a zero-increment report was appended after the periodic one: {:?}",
+        logs(&out)
+    );
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_OFF_REQUEST],
+        "the tool must still be released"
+    );
+}
+
+#[test]
+fn a_session_that_never_ran_still_reports_once() {
+    // Rule 5: every session that started is reported. A tool authorized and
+    // never used is a fact worth recording, so the zero here is the report --
+    // not a suppressed duplicate.
+    let mut m = alice_on(sensing(0, 0, 1_000));
+    let out = m.tool_off(500);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+    );
+    assert_eq!(logs(&out)[0]["seconds"], json!(0.0));
+}
+
+#[test]
+fn an_authorized_but_idle_tool_reports_no_usage_at_all() {
+    // The interval is due repeatedly, and there is nothing to say. An empty
+    // report is noise on the broker and a row in the audit log.
+    let mut m = alice_on(sensing(0, 0, 1_000));
+    let mut all: Vec<Value> = Vec::new();
+    for t in [2_000, 3_000, 4_000] {
+        all.extend(logs(&m.tick(t)));
+    }
+    assert!(
+        all.is_empty(),
+        "an idle tool published usage it never accrued: {all:?}"
+    );
+}
+
+#[test]
+fn a_glitch_on_the_sense_line_is_not_billed() {
+    // 50 ms of noise against a 200 ms allowance. The HV supply next to a
+    // laser's enable line is not quiet.
+    let mut m = alice_on(sensing(200, 0, 0));
+    m.running(true, 1_000);
+    m.running(false, 1_050);
+    let out = m.tool_off(2_000);
+    let log = &logs(&out)[0];
+    assert_eq!(log["seconds"], json!(0.0));
+    assert_eq!(log["active_seconds"], json!(0.0));
+}

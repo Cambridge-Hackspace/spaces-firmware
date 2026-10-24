@@ -5,6 +5,8 @@
 //!
 //! - [`wire`]: the messages a module exchanges with its edge, and their topics.
 //! - [`module`]: the state machine that decides what to do with them.
+//! - [`run_filter`]: conditioning a machine's "working" signal into something
+//!   worth metering.
 //! - [`registration`]: claiming an invite.
 //! - [`backoff`]: how long to wait before trying again.
 //! - [`status`]: what the status light shows.
@@ -15,9 +17,11 @@ pub mod backoff;
 pub mod form;
 pub mod module;
 pub mod registration;
+pub mod run_filter;
 pub mod setup_page;
 pub mod status;
 pub mod weblog;
 pub mod wire;
 
 pub use module::{Action, Config, Module, Output};
+pub use run_filter::RunFilter;

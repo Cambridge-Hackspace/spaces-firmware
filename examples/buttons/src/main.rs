@@ -161,7 +161,25 @@ fn main() -> anyhow::Result<()> {
         .stack_size(4096)
         .spawn(move || read_inputs(buttons, running, button_sender))?;
 
-    let config = Config::new(online.credentials.device_id.clone(), tool_id);
+    let mut config = Config::new(online.credentials.device_id.clone(), tool_id);
+    // This board really does sense the machine -- GPIO21 is the running switch
+    // -- so it says so, and `tool-log` then carries `active_seconds` alongside
+    // `seconds`. A module that leaves this `false` sends no active figure at
+    // all, which is what the server needs to hear from one that cannot tell:
+    // absent falls back to the billable figure, whereas a `0.0` would mean the
+    // machine never ran.
+    config.senses_running = true;
+    // Increments rather than one total at the end, so a reboot mid-session
+    // costs thirty seconds of usage instead of the whole session. Reports
+    // accumulate server-side, so this is safe to do.
+    config.usage_interval_ms = 30_000;
+    // `use_assert_ms` / `use_hold_ms` are left at zero deliberately. The input
+    // here is a toggle switch a person flips, already debounced in
+    // `read_inputs` below, and it means exactly what it says. The filter earns
+    // its keep on a signal that does not: a laser's `L-ON1` enable line drops
+    // on every scan-line return, so an installation driven by one wants a hold
+    // of several seconds or it meters one engrave as hundreds of fragments.
+    // See `spaces_device::run_filter`.
     match spaces_device_espidf::run::run(&online, config, outputs, sender, events) {
         Err(e) => log::error!("{e:#}"),
         Ok(never) => match never {},

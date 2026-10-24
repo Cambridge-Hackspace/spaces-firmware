@@ -42,12 +42,36 @@ pub struct ToolRequest {
     pub tool_id: String,
 }
 
-/// `toolguard/request/tool-log`. `seconds` is what a metered tool bills.
+/// `toolguard/request/tool-log`. `seconds` is what a metered tool bills by
+/// default.
+///
+/// **Two durations, because a working signal gives two honest answers** (CS:S
+/// #169). A laser's enable line drops on every scan-line return, so the same
+/// engrave is either continuous bench time or only the intervals the beam was
+/// on -- 30-50% apart on a raster.
+///
+/// - `seconds` is the usage this module calls billable: the **held** figure,
+///   gaps bridged by [`crate::run_filter::RunFilter`].
+/// - `active_seconds` is the **raw** figure, unbridged.
+///
+/// Which one bills is `tools.usage_basis` on the server, not the module's
+/// choice. **Omit `active_seconds` entirely if nothing is wired in:** absent
+/// means "this device cannot tell" and the server falls back to `seconds`,
+/// while `0.0` means "the machine did not run" and bills nothing. Reporting a
+/// zero from a module with no sensor would make every session on a
+/// working-time-billed tool free.
+///
+/// **Reports accumulate.** The server adds each one to the open session in a
+/// single atomic statement, so a module should send increments on a timer
+/// rather than one total at the end -- a reboot then costs one interval instead
+/// of the whole session. `temperature` is recorded and never billed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolLogRequest {
     pub card: String,
     pub tool_id: String,
     pub seconds: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 }
