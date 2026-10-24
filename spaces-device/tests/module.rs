@@ -901,3 +901,225 @@ fn a_glitch_on_the_sense_line_is_not_billed() {
     assert_eq!(log["seconds"], json!(0.0));
     assert_eq!(log["active_seconds"], json!(0.0));
 }
+
+// ------------------------------------ a device that switches nothing (roles)
+//
+// CS:S binds a device to a resource in a role, and the roles are independent:
+// a box may read cards, switch power, sense the machine, show a panel, or any
+// combination. `gates_power` is the one that changes the protocol, because the
+// edge offers leases only to `power` bindings -- so a device that switches
+// nothing is never leased and must not wait for one.
+
+fn no_power() -> Module {
+    let mut m = Module::new(Config::switches_nothing(ME, TOOL));
+    m.start(0);
+    m
+}
+
+/// Alice is authorized at t=100. No lease, because none is ever coming.
+fn alice_reading(mut m: Module) -> Module {
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m
+}
+
+/// THE DEFECT THIS EXISTS FOR. Built as a power module, a badge reader ends
+/// every authorized scan `first_lease_timeout_ms` later with `NoFirstLease`:
+/// the member watches ACCESS GRANTED turn into a released session, for a lease
+/// that was never going to arrive.
+#[test]
+fn a_device_that_switches_nothing_does_not_wait_for_a_lease() {
+    let mut m = alice_reading(no_power());
+    let out = m.tick(100 + 60_000); // twelve times the lease timeout
+    assert!(
+        publishes_to(&out).is_empty(),
+        "the session was released waiting for a lease it can never get: {out:?}"
+    );
+}
+
+#[test]
+fn a_power_module_still_gives_up_when_no_lease_arrives() {
+    // The other side of the same claim: the arm above must not have been
+    // removed, only scoped. A power module with no lease is a module that
+    // cannot guarantee the tool is safe.
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    let out = m.tick(100 + 5_000);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+    );
+}
+
+#[test]
+fn a_device_that_switches_nothing_drives_no_tool_output() {
+    let mut m = Module::new(Config::switches_nothing(ME, TOOL));
+    let boot = m.start(0);
+    assert!(
+        !boot.iter().any(|a| matches!(
+            a,
+            Action::Set {
+                output: Output::Tool,
+                ..
+            }
+        )),
+        "a device with no relay claimed one at boot: {boot:?}"
+    );
+    let out = alice_reading(m).tick(200);
+    assert!(
+        !out.iter().any(|a| matches!(
+            a,
+            Action::Set {
+                output: Output::Tool,
+                ..
+            }
+        )),
+        "a device with no relay tried to energize a tool: {out:?}"
+    );
+}
+
+#[test]
+fn a_device_that_switches_nothing_reports_no_relay_state_and_no_draw() {
+    // `None` is "cannot tell". A `false` and a `"0.0"` from a device with no
+    // relay are two positive claims about a circuit it cannot see, and the
+    // bypass detector believes both (CS:S #84).
+    let mut m = Module::new(Config::switches_nothing(ME, TOOL));
+    let out = m.start(0);
+    let report = &published(&out, topic::POWER_REPORT)[0];
+    assert_eq!(
+        report["device_id"], ME,
+        "the heartbeat must still identify it"
+    );
+    assert!(
+        report.get("relay_on").is_none(),
+        "claimed a relay state: {report}"
+    );
+    assert!(report.get("draw_now").is_none(), "claimed a draw: {report}");
+}
+
+#[test]
+fn usage_accrues_without_a_lease_when_there_is_nothing_to_energize() {
+    // A reader with a sensor is installed to measure the machine. Gating its
+    // accumulator on a lease it can never get would record nothing, ever.
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.senses_running = true;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    m.running(true, 1_000);
+    m.running(false, 3_000);
+    let out = m.swipe(ALICE, 4_000); // second tap ends it
+    let log = &published(&out, topic::TOOL_LOG_REQUEST)[0];
+    assert_eq!(log["seconds"], json!(2.0));
+    assert_eq!(log["active_seconds"], json!(2.0));
+}
+
+// ------------------------------------------------- stops a reader can reach
+
+#[test]
+fn the_same_card_again_ends_the_session() {
+    // The only stop available to a device that neither switches the tool nor
+    // senses it. Without it `tool-on` opens a session nothing ever closes, and
+    // with billing off the server sweeps nothing either.
+    let mut m = alice_reading(no_power());
+    let out = m.swipe(ALICE, 5_000);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST],
+        "a second tap did not release the tool"
+    );
+    assert_eq!(
+        published(&out, topic::TOOL_OFF_REQUEST)[0]["card"],
+        ALICE,
+        "released with the wrong card"
+    );
+}
+
+#[test]
+fn somebody_elses_card_does_not_end_the_session() {
+    // Ending a stranger's session is not a courtesy. Note the asymmetry with
+    // `tool-off`, which CS:S deliberately accepts from any card so anyone can
+    // cut power for safety -- that is a different act from signing off.
+    let mut m = alice_reading(no_power());
+    let out = m.swipe(BOB, 5_000);
+    assert!(
+        publishes_to(&out).is_empty(),
+        "Bob's tap ended Alice's session: {out:?}"
+    );
+}
+
+#[test]
+fn a_second_tap_is_ignored_where_it_is_not_configured() {
+    // A tool with a physical stop button does not want a re-tap to mean "done"
+    // -- it means "somebody swiped again", which is what the old note says.
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.stop_on_second_tap = false;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    let out = m.swipe(ALICE, 5_000);
+    assert!(publishes_to(&out).is_empty(), "{out:?}");
+}
+
+#[test]
+fn a_machine_left_idle_ends_the_session() {
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.senses_running = true;
+    c.idle_end_ms = 10_000;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    m.running(true, 1_000);
+    m.running(false, 2_000);
+    assert!(
+        publishes_to(&m.tick(11_999)).is_empty(),
+        "ended before the idle timeout"
+    );
+    let out = m.tick(12_000);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST],
+        "the idle timeout never fired"
+    );
+    assert_eq!(
+        published(&out, topic::TOOL_LOG_REQUEST)[0]["seconds"],
+        json!(1.0),
+        "the idle time was billed as usage"
+    );
+}
+
+#[test]
+fn an_idle_timeout_is_ignored_when_nothing_senses_the_machine() {
+    // With no sensor the machine is never "working", so an idle timeout would
+    // end every session the moment it opened -- a tool nobody could use. The
+    // guard is on `senses_running`, not merely on the interval being set.
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.idle_end_ms = 10_000;
+    c.senses_running = false;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    let out = m.tick(60_000);
+    assert!(
+        publishes_to(&out).is_empty(),
+        "a device with no sensor idled its own session out: {out:?}"
+    );
+}
+
+#[test]
+fn the_maximum_session_is_a_backstop_whatever_else_is_true() {
+    // Nobody re-tapped, nothing sensed the machine, no lease lapsed. Without
+    // this a reader-only device can still strand a tool indefinitely.
+    let mut c = Config::switches_nothing(ME, TOOL);
+    c.max_session_ms = 30_000;
+    let mut m = Module::new(c);
+    m.start(0);
+    let mut m = alice_reading(m);
+    assert!(publishes_to(&m.tick(30_099)).is_empty(), "ended early");
+    let out = m.tick(30_100);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+    );
+}

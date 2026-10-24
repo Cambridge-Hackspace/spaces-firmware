@@ -1,4 +1,5 @@
-//! A class 1 module: reads a card, asks the edge, and switches a tool.
+//! A class 1 module: reads a card, asks the edge, and — if it has one to
+//! switch — switches a tool.
 //!
 //! [`Module`] is a pure state machine. Things that happen — a card swiped, a
 //! message from the broker, time passing — go in as method calls with the
@@ -6,24 +7,51 @@
 //! never touches hardware, the network or a clock, which is what lets every
 //! rule below be tested on an ordinary computer.
 //!
+//! **The roles are independent, and [`Config`] is where that lives.** CS:S
+//! binds a device to a resource in a role — `reader`, `power`, `sensor` — and a
+//! box may fill any combination: a badge reader that also switches the laser
+//! and watches it work, a reader that only identifies the member and shows them
+//! an answer, a reader that watches but cannot switch. The two that change the
+//! protocol rather than just the wiring are [`Config::gates_power`], because
+//! the edge leases only `power` bindings, and [`Config::senses_running`],
+//! because absent and zero are different answers to "did the machine run".
+//!
+//! **A session and an energized output are not the same thing**, and conflating
+//! them is what made this type unusable for a device with no relay: it would
+//! wait `first_lease_timeout_ms` for a lease the edge was never going to offer
+//! it, and release the session five seconds after every valid badge.
+//!
 //! The rules, which are the point of this module:
 //!
 //! 1. The tool is energized only while there is an explicit yes for the
-//!    session **and** an unexpired lease. Neither is enough alone.
+//!    session **and** an unexpired lease. Neither is enough alone. A device
+//!    with nothing to energize has no output to drive and is not leased, which
+//!    does not weaken this rule — it is the rule being vacuous.
 //! 2. Anything other than an explicit yes is a no: a refusal, a reply with
 //!    `status: "ok"` but no yes, a reply that does not parse, or no reply at
 //!    all within the timeout.
 //! 3. A lease is timed from its arrival, on the caller's monotonic clock, for
 //!    the `ttl_ms` it carries. When it runs out the tool goes off by itself,
 //!    without any message telling it to. `grant: false` turns it off at once.
-//! 4. Losing the lease ends the session. A renewal arriving afterwards does not
-//!    bring the tool back; a fresh swipe is needed. Auto-restarting a machine
-//!    is the behaviour that latching interlocks exist to prevent.
+//! 4. Losing the lease ends the session, for a device that gates power: it can
+//!    no longer guarantee the tool is safe. A renewal arriving afterwards does
+//!    not bring the tool back; a fresh swipe is needed. Auto-restarting a
+//!    machine is the behaviour that latching interlocks exist to prevent.
 //! 5. Every session that started is ended, however it ends: usage is reported
-//!    and the tool is released, with the card that started the session.
+//!    and the tool is released, with the card that started the session. A
+//!    device with no lease to lapse ends its sessions by the policies in
+//!    [`Config`] — a second tap of the same card, the machine falling idle, or
+//!    a maximum session — because `tool-on` opens a session that something has
+//!    to close and, with `tool_billing.enabled` off, the server sweeps none.
 //! 6. A power report carrying the device id goes out on a fixed interval. It is
-//!    the heartbeat that keeps leases coming.
-//! 7. Only the time the machine was actually running is reported as usage.
+//!    the heartbeat that keeps leases coming, and the only thing on the local
+//!    broker that credits a module with being alive — so every device sends it,
+//!    including one with no relay, which reports no relay state rather than
+//!    claiming `false`.
+//! 7. Usage is the time the machine was working, reported as two figures: the
+//!    held one that [`crate::run_filter`] bridges, and the raw asserted one.
+//!    Which of them bills is the tool's setting on the server, not this
+//!    module's choice.
 
 use crate::run_filter::RunFilter;
 use crate::wire::{topic, Lease, PowerReport, ToolLogRequest, ToolOnReply, ToolRequest};
@@ -95,6 +123,47 @@ pub struct Config {
     /// are safe and a reboot then costs one interval instead of the whole
     /// session. Not the default, because it changes how often a module talks.
     pub usage_interval_ms: u64,
+    /// Whether this device switches the tool's power.
+    ///
+    /// **This is the difference between a session and an energized output, and
+    /// they are not the same thing.** The safety rule is unchanged either way:
+    /// an output is driven only on an explicit yes *and* an unexpired lease.
+    /// What this decides is whether there is an output at all.
+    ///
+    /// `true` is a power module: it drives [`Output::Tool`], the edge leases it
+    /// (`edge/src/modules.rs` offers leases only to `power` bindings), and
+    /// losing the lease ends the session because the device can no longer
+    /// guarantee the tool is safe.
+    ///
+    /// `false` is a device with nothing to energize -- a badge reader that only
+    /// identifies the member and shows them an answer. It is never leased, so
+    /// it must not wait for a lease it will never get: a reader-only device
+    /// built as a power module ends every authorized scan five seconds later
+    /// with `NoFirstLease`, and the member watches ACCESS GRANTED turn into a
+    /// dead session. It also had no safety guarantee to lose, so a lease is not
+    /// what ends its session -- see the policies below.
+    pub gates_power: bool,
+    /// Whether re-tapping the card that started the session ends it.
+    ///
+    /// The honest stop for a device that cannot sense the machine and cannot
+    /// cut its power: the member says when they are done. Required for a
+    /// reader-only device, because `tool-on` opens a session and nothing else
+    /// here would ever close it -- and on the common configuration
+    /// (`tool_billing.enabled = false`) the server has no backstop either, so
+    /// the tool sticks `in_use` for the next member.
+    pub stop_on_second_tap: bool,
+    /// End the session after this long with the machine not working. `0` never.
+    ///
+    /// Needs [`Config::senses_running`] to mean anything: with no sensor the
+    /// machine is never "working", and this would end every session as soon as
+    /// it opened. Guarded rather than trusted -- see `Module::advance`.
+    pub idle_end_ms: u64,
+    /// A session is ended after this long regardless. `0` never.
+    ///
+    /// The backstop for a device whose other stops can all be missed: nobody
+    /// re-taps, nothing senses the machine, and there is no lease to lapse.
+    /// Without it a reader-only device can still strand a tool.
+    pub max_session_ms: u64,
 }
 
 impl Config {
@@ -114,6 +183,28 @@ impl Config {
             use_hold_ms: 0,
             senses_running: false,
             usage_interval_ms: 0,
+            // A power module, as every caller of this constructor was before
+            // the flag existed. Behaviour is unchanged for all of them.
+            gates_power: true,
+            stop_on_second_tap: false,
+            idle_end_ms: 0,
+            max_session_ms: 0,
+        }
+    }
+
+    /// A device that identifies the member and shows them an answer, and
+    /// switches nothing.
+    ///
+    /// Not leased, so it waits for no lease; and since neither a lease nor a
+    /// relay can end its session, the member's second tap does. Add
+    /// [`Config::senses_running`] and [`Config::idle_end_ms`] if something is
+    /// wired in to sense the machine, and set [`Config::max_session_ms`] as a
+    /// backstop for a member who walks away.
+    pub fn switches_nothing(device_id: impl Into<String>, tool_id: impl Into<String>) -> Self {
+        Config {
+            gates_power: false,
+            stop_on_second_tap: true,
+            ..Config::new(device_id, tool_id)
         }
     }
 }
@@ -158,6 +249,10 @@ struct Session {
     reported_active_ms: u64,
     /// When the last usage report went out, for the interval.
     last_usage_at: Option<u64>,
+    /// Since when the machine has not been working, for `idle_end_ms`. Starts
+    /// at authorization, so a session where the machine never starts can still
+    /// time out rather than sitting open until something else notices.
+    idle_since: Option<u64>,
 }
 
 impl Session {
@@ -190,6 +285,21 @@ pub enum EndReason {
     LeaseExpired,
     LeaseRefused,
     NoFirstLease,
+    /// The member re-tapped the card that started the session.
+    SecondTap,
+    /// The machine has not been working for [`Config::idle_end_ms`].
+    Idle,
+    /// [`Config::max_session_ms`] elapsed. The backstop, not a normal stop.
+    MaxSession,
+}
+
+/// What time passing has made due. Decided first, then acted on, so the
+/// decision can read the phase that the action then replaces.
+enum Due {
+    Nothing,
+    ForgetAbandoned,
+    GiveUpAsking(String),
+    End(EndReason),
 }
 
 pub struct Module {
@@ -236,16 +346,20 @@ impl Module {
     /// off state and sends the first heartbeat at once rather than a second
     /// later.
     pub fn start(&mut self, now: u64) -> Vec<Action> {
-        let mut out = vec![
-            Action::Set {
+        // The Tool arm only for a device that has one, as in `update_outputs`.
+        // Putting an output in a known-off state at boot is a safety measure
+        // for a relay; for a device with no relay it is a claim about one.
+        let mut out = Vec::new();
+        if self.config.gates_power {
+            out.push(Action::Set {
                 output: Output::Tool,
                 on: false,
-            },
-            Action::Set {
-                output: Output::Running,
-                on: false,
-            },
-        ];
+            });
+        }
+        out.push(Action::Set {
+            output: Output::Running,
+            on: false,
+        });
         self.tool_on = false;
         self.running_on = false;
         self.heartbeat(now, &mut out);
@@ -268,6 +382,23 @@ impl Module {
                 out.push(Action::Note(format!(
                     "ignoring card {card}: still waiting for the answer about {waiting}"
                 )));
+            }
+            // The member's own card again ends their session, where configured.
+            // This is the only stop a device has that neither switches the
+            // tool nor senses it: there is no lease to lapse and no machine to
+            // go quiet, and `tool-on` has already opened a session that
+            // something must close -- on the default configuration
+            // (`tool_billing.enabled = false`) the server sweeps nothing, so
+            // "nobody closes it" means the tool sticks `in_use` for the next
+            // member.
+            //
+            // Scoped to the card that started it. Anyone else's card is still
+            // refused, because ending a stranger's session is not a courtesy.
+            Phase::Session(session) if self.config.stop_on_second_tap && session.card == card => {
+                out.push(Action::Note(format!(
+                    "card {card} again: ending the session"
+                )));
+                self.end(EndReason::SecondTap, now, &mut out);
             }
             Phase::Session(session) => {
                 out.push(Action::Note(format!(
@@ -331,16 +462,47 @@ impl Module {
     /// Everything that happens just because time has passed. Run first in
     /// every entry point, so an expired lease is noticed before anything else
     /// is decided.
+    /// What should end an open session, and why.
+    ///
+    /// The order is the priority. `max_session_ms` is first because it is the
+    /// backstop: it must fire whatever else is or is not true of the session.
+    ///
+    /// **The lease arms are reached only when this device gates power.** A
+    /// device that switches nothing is never leased
+    /// (`edge/src/modules.rs` offers leases only to `power` bindings), so
+    /// asking it to wait for one ends every authorized scan at
+    /// `first_lease_timeout_ms` with `NoFirstLease`. It also never held the
+    /// safety guarantee that losing a lease represents, so a lapsed lease is
+    /// not what should end its session.
+    fn session_due(&self, session: &Session, now: u64) -> Due {
+        let open_for = now.saturating_sub(session.authorized_at);
+        if self.config.max_session_ms > 0 && open_for >= self.config.max_session_ms {
+            return Due::End(EndReason::MaxSession);
+        }
+        if self.config.gates_power {
+            match session.lease_until {
+                Some(until) if now >= until => return Due::End(EndReason::LeaseExpired),
+                None if open_for >= self.config.first_lease_timeout_ms => {
+                    return Due::End(EndReason::NoFirstLease)
+                }
+                _ => {}
+            }
+        }
+        // Gated on `senses_running`, not merely on the interval being set:
+        // with no sensor the machine is never working, so an idle timeout
+        // would end every session the moment it opened.
+        if self.config.senses_running && self.config.idle_end_ms > 0 {
+            if let Some(since) = session.idle_since {
+                if now.saturating_sub(since) >= self.config.idle_end_ms {
+                    return Due::End(EndReason::Idle);
+                }
+            }
+        }
+        Due::Nothing
+    }
+
     fn advance(&mut self, now: u64) -> Vec<Action> {
         let mut out = Vec::new();
-        // Decide first, then act: the decision reads the phase and the action
-        // replaces it.
-        enum Due {
-            Nothing,
-            ForgetAbandoned,
-            GiveUpAsking(String),
-            End(EndReason),
-        }
         let due = match &self.phase {
             Phase::Idle {
                 abandoned: Some((_, since)),
@@ -350,15 +512,7 @@ impl Module {
             {
                 Due::GiveUpAsking(card.clone())
             }
-            Phase::Session(session) => match session.lease_until {
-                Some(until) if now >= until => Due::End(EndReason::LeaseExpired),
-                None if now.saturating_sub(session.authorized_at)
-                    >= self.config.first_lease_timeout_ms =>
-                {
-                    Due::End(EndReason::NoFirstLease)
-                }
-                _ => Due::Nothing,
-            },
+            Phase::Session(session) => self.session_due(session, now),
             _ => Due::Nothing,
         };
         match due {
@@ -495,6 +649,7 @@ impl Module {
                             reported_ms: 0,
                             reported_active_ms: 0,
                             last_usage_at: None,
+                            idle_since: Some(now),
                         });
                     }
                     Some(reply) => {
@@ -598,6 +753,11 @@ impl Module {
                 "authorized, but no lease arrived; is this module bound in the power role?"
                     .to_string()
             }
+            EndReason::SecondTap => "the same card again: the member is done".to_string(),
+            EndReason::Idle => "the machine has not been working; releasing the tool".to_string(),
+            EndReason::MaxSession => {
+                "the maximum session time elapsed; releasing the tool".to_string()
+            }
         }));
         // Skipped only when a periodic report has already gone out AND there is
         // nothing left to add. Sending the zero anyway would be harmless to the
@@ -611,15 +771,26 @@ impl Module {
 
     /// Bring the outputs, and the running clock, into line with the state.
     fn update_outputs(&mut self, now: u64, out: &mut Vec<Action>) {
-        let tool = match &self.phase {
-            Phase::Session(session) => session.leased(now),
+        // Whether usage may accrue, which is NOT the same question as whether
+        // an output is energized.
+        //
+        // For a power module it is the same: it cannot be running if it is not
+        // energized, and energizing needs the lease. For a device that switches
+        // nothing there is no lease and never will be, so the only thing to
+        // gate on is the session -- and gating on a lease it cannot get would
+        // mean it never recorded a second of the usage it was installed to
+        // measure.
+        let live = match &self.phase {
+            Phase::Session(session) => !self.config.gates_power || session.leased(now),
             _ => false,
         };
-        let running = tool && self.filter.is_on();
-        // The raw signal runs its own clock for `active_seconds`. Gated on the
-        // lease too, so neither figure can accrue time the member was not
-        // authorized for.
-        let active = tool && self.filter.asserted();
+        // The output. Only a device that gates power has one, and the safety
+        // rule for it is unchanged: an explicit yes AND an unexpired lease.
+        let tool = self.config.gates_power && live;
+        let running = live && self.filter.is_on();
+        // The raw signal runs its own clock for `active_seconds`. Gated the
+        // same way, so neither figure can accrue time outside a session.
+        let active = live && self.filter.asserted();
 
         // Both clocks resolve to whatever interval the caller polls at, since
         // an edge is only seen when something calls in. That is well below the
@@ -641,8 +812,24 @@ impl Module {
                 }
                 _ => {}
             }
+            // Idle is measured against the HELD signal, not the raw one, or a
+            // laser's scan-line returns would each reset the idle clock and a
+            // job would look like a machine starting and stopping forever.
+            match (session.idle_since, running) {
+                (Some(_), true) => session.idle_since = None,
+                (None, false) => session.idle_since = Some(now),
+                _ => {}
+            }
         }
 
+        // `Output::Running` is an indicator -- "the machine is working" -- and
+        // any device may have one, including a reader with a sensor and a lamp.
+        // `Output::Tool` is the actuator, and only a device that gates power
+        // has one: emitting it otherwise would have a firmware author wire up
+        // an `Outputs` impl for a relay it has not got, which is how a device
+        // comes to report a relay state the bypass detector then believes
+        // (CS:S #84).
+        //
         // Running goes off before the tool and comes on after it, so the two
         // never disagree about which is allowed.
         if !running && self.running_on {
@@ -652,7 +839,7 @@ impl Module {
                 on: false,
             });
         }
-        if tool != self.tool_on {
+        if self.config.gates_power && tool != self.tool_on {
             self.tool_on = tool;
             out.push(Action::Set {
                 output: Output::Tool,
@@ -686,11 +873,20 @@ impl Module {
         let report = PowerReport {
             tool_id: self.config.tool_id.clone(),
             device_id: Some(self.config.device_id.clone()),
-            draw_now: Some(draw.to_string()),
+            // A device that switches nothing has no draw to report and no
+            // relay to report on. `None` is "cannot tell", which the bypass
+            // detector treats as unknown -- whereas a `"0.0"` and a `false`
+            // from a device with no relay are two positive claims about a
+            // circuit it cannot see, and the detector would believe both.
+            //
+            // The report still goes out. It carries `tool_id` and `device_id`,
+            // which FIRMWARE.md blesses as a valid heartbeat, and it is the
+            // only thing on the local broker that credits a module with being
+            // alive -- so a reader that stopped sending it would be refused a
+            // lease for its tool (CS:S #170).
+            draw_now: self.config.gates_power.then(|| draw.to_string()),
             voltage_now: None,
-            // This module knows its own output, so it says so. A device that
-            // cannot tell would leave this out rather than claim false.
-            relay_on: Some(self.tool_on),
+            relay_on: self.config.gates_power.then_some(self.tool_on),
             self_tripped: None,
         };
         out.push(Action::Publish {
