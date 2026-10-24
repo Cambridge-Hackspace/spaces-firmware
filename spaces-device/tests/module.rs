@@ -1123,3 +1123,100 @@ fn the_maximum_session_is_a_backstop_whatever_else_is_true() {
         vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
     );
 }
+
+// ------------------------------------------------- a plug with no reader
+
+fn plug() -> Module {
+    let mut m = Module::new(Config::power_only(ME, TOOL));
+    m.start(0);
+    m
+}
+
+/// For a plug the lease IS the authorization, not merely permission to stay on.
+/// The edge leases a tool only once its access chain is satisfied, having
+/// consulted whatever read the badge -- #83's coordinator model.
+#[test]
+fn a_plug_energizes_on_a_lease_alone() {
+    let mut m = plug();
+    let out = m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    assert!(out.contains(&Action::Set {
+        output: Output::Tool,
+        on: true
+    }));
+    assert!(m.tool_is_on());
+}
+
+#[test]
+fn a_device_with_a_reader_still_refuses_a_lease_without_a_session() {
+    // The other side: for a device that owns its session a lease is permission
+    // to STAY closed, not to close. This arm must be scoped, not deleted.
+    let mut m = module();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 0);
+    assert!(!m.tool_is_on());
+}
+
+#[test]
+fn a_plug_switches_off_when_its_lease_runs_out() {
+    // Nobody sends a message when a lease expires, by design -- the renewals
+    // stopping IS the instruction.
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    assert!(m.tool_is_on());
+    let out = m.tick(3_100);
+    assert!(out.contains(&Action::Set {
+        output: Output::Tool,
+        on: false
+    }));
+    assert!(!m.tool_is_on());
+}
+
+#[test]
+fn a_plug_switches_off_on_a_withdrawn_lease() {
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 100);
+    let out = m.message(topic::LEASE, &lease(ME, false, 0), 200);
+    assert!(out.contains(&Action::Set {
+        output: Output::Tool,
+        on: false
+    }));
+    assert!(!m.tool_is_on());
+}
+
+#[test]
+fn a_plug_ignores_a_lease_for_another_device() {
+    let mut m = plug();
+    m.message(topic::LEASE, &lease("some-other-plug", true, 60_000), 100);
+    assert!(!m.tool_is_on(), "took a lease addressed to another device");
+}
+
+#[test]
+fn a_plug_publishes_nothing_about_a_card_it_cannot_read() {
+    // It names no card and cannot: `toolguard/lease` carries tool_id,
+    // device_id, grant, ttl_ms and reason -- no card. So tool-on, tool-off and
+    // tool-log are all impossible, and usage on such a tool is the reader's to
+    // report.
+    let mut m = plug();
+    let out = m.swipe(ALICE, 100);
+    assert!(
+        publishes_to(&out).is_empty(),
+        "a plug asked the edge about a card: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|a| matches!(a, Action::Note(n) if n.contains("no reader"))),
+        "a card arriving at a device with no reader should say so: {out:?}"
+    );
+    // And the stray card must not have energized anything.
+    assert!(!m.tool_is_on());
+}
+
+#[test]
+fn a_plug_still_heartbeats_with_its_relay_state() {
+    // It has a relay, so unlike a reader it reports one -- and the report is
+    // what credits it with being alive.
+    let mut m = Module::new(Config::power_only(ME, TOOL));
+    let out = m.start(0);
+    let report = &published(&out, topic::POWER_REPORT)[0];
+    assert_eq!(report["device_id"], ME);
+    assert_eq!(report["relay_on"], false);
+}

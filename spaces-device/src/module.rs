@@ -164,6 +164,25 @@ pub struct Config {
     /// re-taps, nothing senses the machine, and there is no lease to lapse.
     /// Without it a reader-only device can still strand a tool.
     pub max_session_ms: u64,
+    /// Whether this device reads cards, and so owns the session.
+    ///
+    /// `true` is a device with a reader: a swipe asks the edge, the answer
+    /// opens a session here, and this device reports and releases it.
+    ///
+    /// `false` is a plug. It has no reader, so it never learns a card and owns
+    /// no session -- some other device bound to the same tool read the badge.
+    /// **For it the lease is not permission to stay on, it is the whole
+    /// authorization**, because the edge only ever leases a tool whose access
+    /// chain it has already satisfied. That is #83's coordinator model: reader
+    /// auth, edge decides, plug obeys.
+    ///
+    /// A plug publishes no `tool-on`, `tool-off` or `tool-log`, and **cannot**,
+    /// even with a sensor wired in: every one of those names a card, and
+    /// nothing the edge sends a power module carries one -- `toolguard/lease`
+    /// has `tool_id`, `device_id`, `grant`, `ttl_ms` and `reason`, and no card.
+    /// So usage on such a tool is the reader's to report. A plug's sensor is
+    /// still worth having for the Running indicator and the draw figure.
+    pub reads_cards: bool,
 }
 
 impl Config {
@@ -189,6 +208,18 @@ impl Config {
             stop_on_second_tap: false,
             idle_end_ms: 0,
             max_session_ms: 0,
+            reads_cards: true,
+        }
+    }
+
+    /// A plug: switches the tool, reads no card, owns no session.
+    ///
+    /// Energized exactly while the edge's lease for it is unexpired, and off
+    /// the moment it is not. Reports draw and relay state, and heartbeats.
+    pub fn power_only(device_id: impl Into<String>, tool_id: impl Into<String>) -> Self {
+        Config {
+            reads_cards: false,
+            ..Config::new(device_id, tool_id)
         }
     }
 
@@ -309,6 +340,10 @@ pub struct Module {
     /// Both are kept because they meter different figures: the filtered one is
     /// `seconds`, the raw one `active_seconds`.
     filter: RunFilter,
+    /// The lease held by a device that owns no session of its own, i.e. a plug
+    /// ([`Config::reads_cards`] false). For a device with a reader the lease
+    /// lives on its [`Session`] instead, because it is scoped to that session.
+    standing_lease: Option<u64>,
     /// The outputs as last set, so only changes are emitted.
     tool_on: bool,
     running_on: bool,
@@ -322,6 +357,7 @@ impl Module {
             config,
             phase: Phase::Idle { abandoned: None },
             filter,
+            standing_lease: None,
             tool_on: false,
             running_on: false,
             last_report: None,
@@ -369,6 +405,16 @@ impl Module {
     /// A card was presented.
     pub fn swipe(&mut self, card: &str, now: u64) -> Vec<Action> {
         let mut out = self.advance(now);
+        // A plug has no reader. Reported rather than ignored, because a card
+        // arriving at a device configured not to have one means the config and
+        // the hardware disagree, and the symptom otherwise is a tool that
+        // never comes on with nothing anywhere saying why.
+        if !self.config.reads_cards {
+            out.push(Action::Note(format!(
+                "ignoring card {card}: this device is configured with no reader"
+            )));
+            return out;
+        }
         match &self.phase {
             Phase::Idle { .. } => {
                 out.push(Action::Note(format!("asking the edge about card {card}")));
@@ -696,10 +742,21 @@ impl Module {
         if lease.device_id != self.config.device_id {
             return; // every module on the broker sees every lease
         }
+        // A plug has no session, and for it the lease is the whole
+        // authorization: the edge only leases a tool whose access chain it has
+        // already satisfied, having consulted whatever read the badge.
+        if !self.config.reads_cards {
+            self.standing_lease = lease.grant.then(|| now.saturating_add(lease.ttl_ms));
+            if !lease.grant {
+                out.push(Action::Note("lease withdrawn; switching off".into()));
+            }
+            self.update_outputs(now, out);
+            return;
+        }
         if !matches!(self.phase, Phase::Session(_)) {
-            // A lease is permission for a relay to stay closed, not permission
-            // to close it. Without an authorized session there is nothing to
-            // keep on.
+            // For a device that reads cards, a lease is permission for a relay
+            // to stay closed, not permission to close it. Without an authorized
+            // session of its own there is nothing to keep on.
             return;
         }
         if !lease.grant {
@@ -780,9 +837,17 @@ impl Module {
         // gate on is the session -- and gating on a lease it cannot get would
         // mean it never recorded a second of the usage it was installed to
         // measure.
-        let live = match &self.phase {
-            Phase::Session(session) => !self.config.gates_power || session.leased(now),
-            _ => false,
+        let live = if self.config.reads_cards {
+            match &self.phase {
+                Phase::Session(session) => !self.config.gates_power || session.leased(now),
+                _ => false,
+            }
+        } else {
+            // A plug: no session of its own, so the lease is the authorization
+            // and its expiry is the instruction to stop. Read here rather than
+            // tracked as an event, so it lapses on whatever call comes next --
+            // nobody sends a message when a lease runs out, by design.
+            self.standing_lease.is_some_and(|until| now < until)
         };
         // The output. Only a device that gates power has one, and the safety
         // rule for it is unchanged: an explicit yes AND an unexpired lease.
