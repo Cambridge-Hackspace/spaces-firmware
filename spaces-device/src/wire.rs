@@ -16,6 +16,9 @@ pub mod topic {
     pub const TOOL_OFF_REQUEST: &str = "toolguard/request/tool-off";
     pub const TOOL_LOG_REQUEST: &str = "toolguard/request/tool-log";
     pub const POWER_REPORT: &str = "toolguard/request/power";
+    /// This device is alive. Every role, on the heartbeat timer; see
+    /// [`super::AliveRequest`] for why it exists (CS:S #170).
+    pub const ALIVE_REQUEST: &str = "toolguard/request/alive";
 
     pub const TOOL_ON_RESPONSE: &str = "toolguard/response/tool-on";
     pub const TOOL_OFF_RESPONSE: &str = "toolguard/response/tool-off";
@@ -74,6 +77,24 @@ pub struct ToolLogRequest {
     pub active_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+}
+
+/// `toolguard/request/alive`: this device is alive (CS:S #170).
+///
+/// **Every device sends it, whatever its role**, on the heartbeat timer. It is
+/// the liveness contract on the local broker: the edge credits every binding the
+/// device holds, and forwards it so the server's `last_seen_at` -- what the
+/// silence detector and the admin device list read -- is written too.
+///
+/// A power report counts as alive as well, but only a plug can send one the
+/// server will accept: the relay is gated on the `power` binding. A reader or a
+/// sensor behind an edge was therefore invisible to the server, and with the
+/// default `fail_off` a reader denied its own tool a lease forever. This is the
+/// message that fixes that. It carries the device id and nothing else: health
+/// beyond "alive" is a different message with its own shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AliveRequest {
+    pub device_id: String,
 }
 
 /// `toolguard/request/power`. Also the module's heartbeat: the edge counts a

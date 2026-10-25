@@ -37,7 +37,10 @@ fn publishes_to(actions: &[Action]) -> Vec<&'static str> {
             Action::Publish { topic, .. } => Some(*topic),
             _ => None,
         })
-        .filter(|t| *t != topic::POWER_REPORT)
+        // Both heartbeats are filtered out, so assertions about the protocol's
+        // decisions are not drowned by the two messages every tick sends. The
+        // heartbeats have their own arms below.
+        .filter(|t| *t != topic::POWER_REPORT && *t != topic::ALIVE_REQUEST)
         .collect()
 }
 
@@ -1349,4 +1352,66 @@ fn a_plug_has_no_activity_of_its_own() {
     m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
     assert!(m.tool_is_on());
     assert_eq!(m.activity(), Activity::Idle);
+}
+
+// ------------------------------------------------- the pulse (CS:S #170)
+//
+// Every device says it is alive, whatever its role. This is what lets a reader
+// or a sensor -- which has no power to report -- be heard from at all, at the
+// edge and at the server.
+
+fn pulses(actions: &[Action]) -> Vec<Value> {
+    published(actions, topic::ALIVE_REQUEST)
+}
+
+#[test]
+fn every_role_pulses_on_start_and_on_every_heartbeat() {
+    for (label, config) in [
+        ("reader+power", Config::new(ME, TOOL)),
+        ("reader only", Config::switches_nothing(ME, TOOL)),
+        ("plug", Config::power_only(ME, TOOL)),
+    ] {
+        let mut m = Module::new(config);
+        let boot = m.start(0);
+        assert_eq!(
+            pulses(&boot).len(),
+            1,
+            "{label}: the first pulse goes out at start, with the first power report"
+        );
+        // Inside the interval: nothing. On it: one. The pulse rides the same
+        // timer as the power report, so the two cannot drift apart.
+        assert!(pulses(&m.tick(999)).is_empty(), "{label}: pulsed early");
+        assert_eq!(
+            pulses(&m.tick(1_000)).len(),
+            1,
+            "{label}: no pulse on the heartbeat"
+        );
+    }
+}
+
+#[test]
+fn the_pulse_names_this_device_and_nothing_else() {
+    // The device id is what the edge resolves to bindings. Nothing else: health
+    // beyond "alive" is a different message, and a pulse that grew fields would
+    // be the expensive-every-second kind.
+    let mut m = Module::new(Config::switches_nothing(ME, TOOL));
+    let out = m.start(0);
+    let pulse = &pulses(&out)[0];
+    assert_eq!(pulse["device_id"], ME);
+    assert_eq!(
+        pulse.as_object().map(|o| o.len()),
+        Some(1),
+        "the pulse carries more than the device id: {pulse}"
+    );
+}
+
+#[test]
+fn a_device_that_switches_nothing_still_sends_a_power_report_alongside() {
+    // Not instead of. Edges that predate the pulse credit only the power
+    // report, so dropping it from a reader would reintroduce the silence this
+    // fixes against them.
+    let mut m = Module::new(Config::switches_nothing(ME, TOOL));
+    let out = m.start(0);
+    assert_eq!(published(&out, topic::POWER_REPORT).len(), 1);
+    assert_eq!(pulses(&out).len(), 1);
 }

@@ -54,7 +54,9 @@
 //!    module's choice.
 
 use crate::run_filter::RunFilter;
-use crate::wire::{topic, Lease, PowerReport, ToolLogRequest, ToolOnReply, ToolRequest};
+use crate::wire::{
+    topic, AliveRequest, Lease, PowerReport, ToolLogRequest, ToolOnReply, ToolRequest,
+};
 
 /// The two outputs a module drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1016,11 +1018,9 @@ impl Module {
             // from a device with no relay are two positive claims about a
             // circuit it cannot see, and the detector would believe both.
             //
-            // The report still goes out. It carries `tool_id` and `device_id`,
-            // which FIRMWARE.md blesses as a valid heartbeat, and it is the
-            // only thing on the local broker that credits a module with being
-            // alive -- so a reader that stopped sending it would be refused a
-            // lease for its tool (CS:S #170).
+            // The report still goes out: it is the plug's telemetry, and it
+            // counts as being alive too for edges that predate the pulse. The
+            // pulse below is the liveness contract proper (CS:S #170).
             draw_now: self.config.gates_power.then(|| draw.to_string()),
             voltage_now: None,
             relay_on: self.config.gates_power.then_some(self.tool_on),
@@ -1029,6 +1029,19 @@ impl Module {
         out.push(Action::Publish {
             topic: topic::POWER_REPORT,
             payload: serde_json::to_string(&report).expect("a PowerReport always serializes"),
+        });
+
+        // The pulse (CS:S #170). Every role, every heartbeat. A reader or a
+        // sensor has no power to report, and the server refuses a relayed power
+        // report for anything not bound as `power` -- so without this they were
+        // invisible to the server and, under the default `fail_off`, a reader
+        // denied its own tool a lease forever.
+        let alive = AliveRequest {
+            device_id: self.config.device_id.clone(),
+        };
+        out.push(Action::Publish {
+            topic: topic::ALIVE_REQUEST,
+            payload: serde_json::to_string(&alive).expect("an AliveRequest always serializes"),
         });
     }
 
