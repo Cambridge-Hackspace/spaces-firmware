@@ -318,29 +318,115 @@ enum Phase {
     Session(Session),
 }
 
+/// The two usage clocks and what has been reported of them.
+///
+/// One of these runs under a session on a device that reads cards, and one
+/// runs while a plug is energized (CS:S #174): the same figures, reported the
+/// same way, with or without a card to name.
+#[derive(Debug, Clone, PartialEq)]
+struct Meter {
+    /// When this meter opened: the interval for the first report counts from
+    /// here, so a zero-length report never falls out the moment it opens.
+    opened_at: u64,
+    /// Usage so far, and when the current run started, if running. This is the
+    /// **held** figure -- gaps bridged by the run filter -- and it is what
+    /// `tool-log`'s `seconds` carries.
+    held_ms: u64,
+    held_since: Option<u64>,
+    /// The same clock against the **raw** signal, unbridged: `active_seconds`.
+    /// On a laser this is beam-on time where `held_ms` is bench time, and the
+    /// two differ by 30-50% on a raster.
+    raw_ms: u64,
+    raw_since: Option<u64>,
+    /// How much of each figure has already been published. Reports are
+    /// increments, so the next one carries the difference -- not the total, or
+    /// the server's accumulation would count every interval twice.
+    reported_held_ms: u64,
+    reported_raw_ms: u64,
+    /// When the last usage report went out, for the interval.
+    last_report_at: Option<u64>,
+}
+
+impl Meter {
+    fn open(now: u64) -> Self {
+        Meter {
+            opened_at: now,
+            held_ms: 0,
+            held_since: None,
+            raw_ms: 0,
+            raw_since: None,
+            reported_held_ms: 0,
+            reported_raw_ms: 0,
+            last_report_at: None,
+        }
+    }
+
+    /// Both figures as of `at`, including any run still open.
+    ///
+    /// Non-mutating on purpose: a reporter that folded the open interval into
+    /// the accumulator to read it would double-count the moment it was called
+    /// twice before the machine stopped.
+    fn totals(&self, at: u64) -> (u64, u64) {
+        let held = self.held_ms + self.held_since.map_or(0, |since| at.saturating_sub(since));
+        let raw = self.raw_ms + self.raw_since.map_or(0, |since| at.saturating_sub(since));
+        (held, raw)
+    }
+
+    /// What has accrued since the last report: the next increment.
+    fn unreported(&self, at: u64) -> (u64, u64) {
+        let (held, raw) = self.totals(at);
+        (
+            held.saturating_sub(self.reported_held_ms),
+            raw.saturating_sub(self.reported_raw_ms),
+        )
+    }
+
+    fn mark_reported(&mut self, at: u64) {
+        let (held, raw) = self.totals(at);
+        self.reported_held_ms = held;
+        self.reported_raw_ms = raw;
+        self.last_report_at = Some(at);
+    }
+
+    /// Whether a periodic report is due. From the last report, or from the
+    /// opening for the first one -- not from `None` meaning "due immediately".
+    fn report_due(&self, interval_ms: u64, now: u64) -> bool {
+        interval_ms > 0
+            && now.saturating_sub(self.last_report_at.unwrap_or(self.opened_at)) >= interval_ms
+    }
+
+    /// Advance both clocks to the current state of their signals.
+    ///
+    /// Both resolve to whatever interval the caller polls at, since an edge is
+    /// only seen when something calls in. That is well below the precision
+    /// `use_hold_ms` already imposes on the held figure.
+    fn note(&mut self, held: bool, raw: bool, now: u64) {
+        match (self.held_since, held) {
+            (None, true) => self.held_since = Some(now),
+            (Some(since), false) => {
+                self.held_ms += now.saturating_sub(since);
+                self.held_since = None;
+            }
+            _ => {}
+        }
+        match (self.raw_since, raw) {
+            (None, true) => self.raw_since = Some(now),
+            (Some(since), false) => {
+                self.raw_ms += now.saturating_sub(since);
+                self.raw_since = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Session {
     card: String,
     authorized_at: u64,
     /// When the current lease runs out. `None` until the first lease arrives.
     lease_until: Option<u64>,
-    /// Usage so far, and when the current run started, if running. This is the
-    /// **held** figure -- gaps bridged by the run filter -- and it is what
-    /// `tool-log`'s `seconds` carries.
-    running_ms: u64,
-    running_since: Option<u64>,
-    /// The same clock against the **raw** signal, unbridged: `active_seconds`.
-    /// On a laser this is beam-on time where `running_ms` is bench time, and
-    /// the two differ by 30-50% on a raster.
-    active_ms: u64,
-    active_since: Option<u64>,
-    /// How much of each figure has already been published. Reports are
-    /// increments, so the next one carries the difference -- not the total, or
-    /// the server's accumulation would count every interval twice.
-    reported_ms: u64,
-    reported_active_ms: u64,
-    /// When the last usage report went out, for the interval.
-    last_usage_at: Option<u64>,
+    meter: Meter,
     /// Since when the machine has not been working, for `idle_end_ms`. Starts
     /// at authorization, so a session where the machine never starts can still
     /// time out rather than sitting open until something else notices.
@@ -350,23 +436,6 @@ struct Session {
 impl Session {
     fn leased(&self, now: u64) -> bool {
         self.lease_until.is_some_and(|until| now < until)
-    }
-
-    /// Both figures as of `at`, including any run still open.
-    ///
-    /// Non-mutating on purpose: a reporter that folded the open interval into
-    /// the accumulator to read it would double-count the moment it was called
-    /// twice before the machine stopped.
-    fn totals(&self, at: u64) -> (u64, u64) {
-        let held = self.running_ms
-            + self
-                .running_since
-                .map_or(0, |since| at.saturating_sub(since));
-        let raw = self.active_ms
-            + self
-                .active_since
-                .map_or(0, |since| at.saturating_sub(since));
-        (held, raw)
     }
 }
 
@@ -405,6 +474,10 @@ pub struct Module {
     /// ([`Config::reads_cards`] false). For a device with a reader the lease
     /// lives on its [`Session`] instead, because it is scoped to that session.
     standing_lease: Option<u64>,
+    /// A plug's meter: open while it is energized, closed -- and reported,
+    /// naming no card -- when the lease lapses (CS:S #174). A device with a
+    /// reader meters under its [`Session`] instead.
+    standing_meter: Option<Meter>,
     /// The outputs as last set, so only changes are emitted.
     tool_on: bool,
     running_on: bool,
@@ -419,6 +492,7 @@ impl Module {
             phase: Phase::Idle { abandoned: None },
             filter,
             standing_lease: None,
+            standing_meter: None,
             tool_on: false,
             running_on: false,
             last_report: None,
@@ -458,7 +532,7 @@ impl Module {
     ///
     /// `None` outside a session, and `None` always on a device that does not
     /// sense the machine: it has no figure, and a panel must not invent one.
-    /// Non-mutating, like [`Session::totals`]; the caller is expected to have
+    /// Non-mutating, like [`Meter::totals`]; the caller is expected to have
     /// ticked to `now` first, since the hold releases only when something
     /// notices.
     pub fn usage(&self, now: u64) -> Option<Usage> {
@@ -467,8 +541,8 @@ impl Module {
         }
         match &self.phase {
             Phase::Session(session) => Some(Usage {
-                running: session.running_since.is_some(),
-                seconds: session.totals(now).0 / 1000,
+                running: session.meter.held_since.is_some(),
+                seconds: session.meter.totals(now).0 / 1000,
             }),
             _ => None,
         }
@@ -695,35 +769,32 @@ impl Module {
     /// module that re-sent the running total would be billed for the sum of a
     /// series instead of its last term.
     fn maybe_report_usage(&mut self, now: u64, out: &mut Vec<Action>) {
-        if self.config.usage_interval_ms == 0 {
-            return;
-        }
-        let Phase::Session(session) = &self.phase else {
-            return;
+        let interval = self.config.usage_interval_ms;
+        // Nothing accrued means no report: the machine is authorized but idle,
+        // and an empty report would be noise on the broker and a row in the
+        // audit log. Decided here, with the meter borrowed, and published
+        // after, with it released.
+        let due = match (&mut self.phase, &mut self.standing_meter) {
+            (Phase::Session(session), _) if session.meter.report_due(interval, now) => {
+                let (d_held, d_raw) = session.meter.unreported(now);
+                if d_held == 0 && d_raw == 0 {
+                    return;
+                }
+                session.meter.mark_reported(now);
+                Some((Some(session.card.clone()), d_held, d_raw))
+            }
+            (_, Some(meter)) if meter.report_due(interval, now) => {
+                let (d_held, d_raw) = meter.unreported(now);
+                if d_held == 0 && d_raw == 0 {
+                    return;
+                }
+                meter.mark_reported(now);
+                Some((None, d_held, d_raw))
+            }
+            _ => None,
         };
-        // From the last report, or from authorization for the first one -- not
-        // from `None` meaning "due immediately", which would publish a
-        // zero-length report the moment a session opened.
-        let since = session.last_usage_at.unwrap_or(session.authorized_at);
-        if now.saturating_sub(since) < self.config.usage_interval_ms {
-            return;
-        }
-        let (held, raw) = session.totals(now);
-        if held == session.reported_ms && raw == session.reported_active_ms {
-            // Nothing accrued. The machine is authorized but idle, and an empty
-            // report would be noise on the broker and a row in the audit log.
-            return;
-        }
-        let card = session.card.clone();
-        let (d_held, d_raw) = (
-            held.saturating_sub(session.reported_ms),
-            raw.saturating_sub(session.reported_active_ms),
-        );
-        out.push(self.usage_action(&card, d_held, d_raw));
-        if let Phase::Session(session) = &mut self.phase {
-            session.reported_ms = held;
-            session.reported_active_ms = raw;
-            session.last_usage_at = Some(now);
+        if let Some((card, d_held, d_raw)) = due {
+            out.push(self.usage_action(card.as_deref(), d_held, d_raw));
         }
     }
 
@@ -731,10 +802,12 @@ impl Module {
     ///
     /// `active_seconds` is omitted unless this module actually senses the
     /// machine, because absent and zero mean different things to the server:
-    /// absent falls back to the billable figure, zero bills nothing.
-    fn usage_action(&self, card: &str, held_ms: u64, raw_ms: u64) -> Action {
+    /// absent falls back to the billable figure, zero bills nothing. `card` is
+    /// omitted by a plug, which never learns one: the server attributes the
+    /// usage to whoever is signed on to the tool (CS:S #174).
+    fn usage_action(&self, card: Option<&str>, held_ms: u64, raw_ms: u64) -> Action {
         let log = ToolLogRequest {
-            card: card.to_string(),
+            card: card.map(str::to_string),
             tool_id: self.config.tool_id.clone(),
             seconds: held_ms as f64 / 1000.0,
             active_seconds: self.config.senses_running.then_some(raw_ms as f64 / 1000.0),
@@ -786,13 +859,7 @@ impl Module {
                             card,
                             authorized_at: now,
                             lease_until: None,
-                            running_ms: 0,
-                            running_since: None,
-                            active_ms: 0,
-                            active_since: None,
-                            reported_ms: 0,
-                            reported_active_ms: 0,
-                            last_usage_at: None,
+                            meter: Meter::open(now),
                             idle_since: Some(now),
                         });
                     }
@@ -897,14 +964,12 @@ impl Module {
         // periodic report. With `usage_interval_ms = 0` nothing has been
         // reported yet, so the remainder IS the total and this is the one
         // report of the session.
-        let (held, raw) = session.totals(stopped_at);
-        let d_held = held.saturating_sub(session.reported_ms);
-        let d_raw = raw.saturating_sub(session.reported_active_ms);
+        let (d_held, d_raw) = session.meter.unreported(stopped_at);
         // Whether a periodic report already covered the session. A session that
         // reported nothing always gets a report, even a zero one -- rule 5 says
         // every session that started is reported, and a tool that was
         // authorized and never used is a fact worth recording.
-        let reported_before = session.last_usage_at.is_some();
+        let reported_before = session.meter.last_report_at.is_some();
         let card = session.card.clone();
         self.phase = Phase::Idle { abandoned: None };
         self.update_outputs(now, out);
@@ -928,7 +993,7 @@ impl Module {
         // server's accumulation but is pure noise on the broker and a row in
         // the audit log for every session.
         if !(reported_before && d_held == 0 && d_raw == 0) {
-            out.push(self.usage_action(&card, d_held, d_raw));
+            out.push(self.usage_action(Some(&card), d_held, d_raw));
         }
         out.push(self.request(topic::TOOL_OFF_REQUEST, &card));
         // After the release, not before: the panel saying "session ended" while
@@ -964,30 +1029,23 @@ impl Module {
         // rule for it is unchanged: an explicit yes AND an unexpired lease.
         let tool = self.config.gates_power && live;
         let running = live && self.filter.is_on();
+        // The billable figure is the usage this device can honestly measure
+        // (CS:S #174). With a sensor, the machine working -- the held signal.
+        // Without one, if it switches the power, the time the power was on:
+        // "when the power is on, the bill goes to the tool". A bare reader has
+        // neither and reports no time; it was never installed to measure any.
+        let occupancy = live
+            && if self.config.senses_running {
+                self.filter.is_on()
+            } else {
+                self.config.gates_power
+            };
         // The raw signal runs its own clock for `active_seconds`. Gated the
         // same way, so neither figure can accrue time outside a session.
         let active = live && self.filter.asserted();
 
-        // Both clocks resolve to whatever interval the caller polls at, since
-        // an edge is only seen when something calls in. That is well below the
-        // precision `use_hold_ms` already imposes on the held figure.
         if let Phase::Session(session) = &mut self.phase {
-            match (session.running_since, running) {
-                (None, true) => session.running_since = Some(now),
-                (Some(since), false) => {
-                    session.running_ms += now.saturating_sub(since);
-                    session.running_since = None;
-                }
-                _ => {}
-            }
-            match (session.active_since, active) {
-                (None, true) => session.active_since = Some(now),
-                (Some(since), false) => {
-                    session.active_ms += now.saturating_sub(since);
-                    session.active_since = None;
-                }
-                _ => {}
-            }
+            session.meter.note(occupancy, active, now);
             // Idle is measured against the HELD signal, not the raw one, or a
             // laser's scan-line returns would each reset the idle clock and a
             // job would look like a machine starting and stopping forever.
@@ -995,6 +1053,37 @@ impl Module {
                 (Some(_), true) => session.idle_since = None,
                 (None, false) => session.idle_since = Some(now),
                 _ => {}
+            }
+        }
+
+        // A plug's meter opens when it energizes and closes when it does not,
+        // reporting what accrued with no card to name (CS:S #174): the server
+        // attributes it to whoever is signed on to the tool. A lapsed lease cut
+        // the power when it ran out, which may be a little before this call
+        // noticed; bill to the cut, not to the noticing.
+        if !self.config.reads_cards {
+            match (self.standing_meter.as_mut(), live) {
+                (None, true) => {
+                    // Noted on the pass that opens it, or the first interval
+                    // would be lost to whenever the next call happened to come.
+                    let mut meter = Meter::open(now);
+                    meter.note(occupancy, active, now);
+                    self.standing_meter = Some(meter);
+                }
+                (Some(meter), true) => meter.note(occupancy, active, now),
+                (Some(meter), false) => {
+                    let stopped_at = self.standing_lease.map_or(now, |until| until.min(now));
+                    meter.note(false, false, stopped_at);
+                    let (d_held, d_raw) = meter.unreported(stopped_at);
+                    let reported_before = meter.last_report_at.is_some();
+                    self.standing_meter = None;
+                    // The same rule as a session's end: skipped only when a
+                    // periodic report already went out AND nothing is left.
+                    if !(reported_before && d_held == 0 && d_raw == 0) {
+                        out.push(self.usage_action(None, d_held, d_raw));
+                    }
+                }
+                (None, false) => {}
             }
         }
 

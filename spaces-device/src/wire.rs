@@ -48,6 +48,12 @@ pub struct ToolRequest {
 /// `toolguard/request/tool-log`. `seconds` is what a metered tool bills by
 /// default.
 ///
+/// **`card` is optional** (CS:S #174). A device that identified the member
+/// names their card, and the server checks it against the session. A device
+/// that cannot -- a plug, which only ever receives a lease -- names the tool
+/// alone, and the server attributes the usage to whoever is signed on to that
+/// tool. The server already knows; the plug does not have to.
+///
 /// **Two durations, because a working signal gives two honest answers** (CS:S
 /// #169). A laser's enable line drops on every scan-line return, so the same
 /// engrave is either continuous bench time or only the intervals the beam was
@@ -70,7 +76,8 @@ pub struct ToolRequest {
 /// of the whole session. `temperature` is recorded and never billed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolLogRequest {
-    pub card: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
     pub tool_id: String,
     pub seconds: f64,
     #[serde(skip_serializing_if = "Option::is_none")]

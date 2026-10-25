@@ -66,6 +66,21 @@ fn alice_running_tool() -> Module {
     m
 }
 
+/// The same, on a box that declares a sensor. The metering arms drive a
+/// running input, which only a device with a sensor has; on one without, the
+/// billable figure is the time the power was on (CS:S #174), not the input.
+fn alice_running_sensed_tool() -> Module {
+    let mut c = Config::new(ME, TOOL);
+    c.senses_running = true;
+    let mut m = Module::new(c);
+    m.start(0);
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+    assert!(m.tool_is_on(), "setup: Alice's tool should be on");
+    m
+}
+
 // ---------------------------------------------------------------- start-up
 
 #[test]
@@ -495,7 +510,7 @@ fn running_follows_the_switch_while_the_tool_is_on() {
 
 #[test]
 fn only_running_time_is_reported_as_usage() {
-    let mut m = alice_running_tool(); // session open from 100, on from 200
+    let mut m = alice_running_sensed_tool(); // session open from 100, on from 200
     m.message(topic::LEASE, &lease(ME, true, 3000), 1000);
     m.running(true, 1000);
     m.running(false, 2500); // 1.5 s
@@ -511,7 +526,7 @@ fn only_running_time_is_reported_as_usage() {
 
 #[test]
 fn a_run_still_going_at_tool_off_is_counted() {
-    let mut m = alice_running_tool();
+    let mut m = alice_running_sensed_tool();
     m.running(true, 1000);
     let out = m.tool_off(2000);
     assert_eq!(
@@ -522,7 +537,7 @@ fn a_run_still_going_at_tool_off_is_counted() {
 
 #[test]
 fn the_count_stops_the_moment_the_lease_lapses() {
-    let mut m = alice_running_tool(); // leased until 3200
+    let mut m = alice_running_sensed_tool(); // leased until 3200
     m.running(true, 1200);
     let out = m.tick(9000); // noticed late; the cut was at 3200
     assert!(!m.running_is_on());
@@ -699,11 +714,35 @@ fn a_module_that_senses_nothing_omits_the_active_figure() {
     m.running(true, 1000);
     let out = m.tool_off(2000);
     let log = &logs(&out)[0];
-    assert_eq!(log["seconds"], json!(1.0));
+    // Its billable figure is the time the power was on -- energized from 200
+    // -- not the input it declares it has not got (CS:S #174).
+    assert_eq!(log["seconds"], json!(1.8));
     assert!(
         log.get("active_seconds").is_none(),
         "a module with no sensor claimed to have measured the machine: {log}"
     );
+}
+
+#[test]
+fn a_box_that_switches_power_but_senses_nothing_bills_the_time_the_power_was_on() {
+    // "When the power is on, the bill goes to the tool" (CS:S #174). Before
+    // this, a reader+relay box with no sensor reported 0.0 for every session
+    // and a per-minute tool behind it was free.
+    let mut m = alice_running_tool(); // energized from 200
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 1_000);
+    let out = m.tool_off(5_200);
+    let log = &logs(&out)[0];
+    assert_eq!(log["seconds"], json!(5.0));
+    assert!(log.get("active_seconds").is_none(), "{log}");
+}
+
+#[test]
+fn a_bare_reader_with_no_sensor_still_reports_no_time() {
+    // It neither switches the power nor senses the machine, so it has nothing
+    // to measure; signed-in time is not usage.
+    let mut m = alice_reading(no_power());
+    let out = m.swipe(ALICE, 30_000); // second tap ends it
+    assert_eq!(logs(&out)[0]["seconds"], json!(0.0));
 }
 
 #[test]
@@ -1341,6 +1380,115 @@ fn a_device_that_switches_nothing_is_in_session_but_never_energized() {
         m.activity(),
         Activity::Session { energized: false },
         "a device with no relay reported an energized tool"
+    );
+}
+
+// ------------------------------------------------- a plug meters (CS:S #174)
+//
+// The plug is the device that knows whether the power is on and, with a
+// sensor, whether the machine is working -- and it never learns a card. So it
+// reports usage naming the tool alone, and the server attributes it to whoever
+// is signed on to that tool.
+
+fn plug_with(interval_ms: u64, senses: bool) -> Module {
+    let mut c = Config::power_only(ME, TOOL);
+    c.usage_interval_ms = interval_ms;
+    c.senses_running = senses;
+    let mut m = Module::new(c);
+    m.start(0);
+    m
+}
+
+#[test]
+fn a_plug_meters_the_time_it_is_energized_and_reports_it_with_no_card() {
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 5_000), 100); // energized 100..5100
+    assert!(
+        logs(&m.tick(3_000)).is_empty(),
+        "reported mid-lease with no interval set"
+    );
+    let out = m.tick(5_100);
+    assert!(!m.tool_is_on());
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_LOG_REQUEST],
+        "a plug reports usage and nothing else -- it has no card to release with"
+    );
+    let log = &logs(&out)[0];
+    assert!(
+        log.get("card").is_none(),
+        "a plug named a card it cannot know: {log}"
+    );
+    assert_eq!(log["tool_id"], TOOL);
+    assert_eq!(log["seconds"], json!(5.0));
+    assert!(
+        log.get("active_seconds").is_none(),
+        "no sensor, yet a working figure: {log}"
+    );
+}
+
+#[test]
+fn a_plugs_count_stops_at_the_cut_not_at_the_noticing() {
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100); // cut at 3100
+    let out = m.tick(9_000);
+    assert_eq!(logs(&out)[0]["seconds"], json!(3.0));
+}
+
+#[test]
+fn a_withdrawn_lease_closes_the_plugs_meter() {
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 100);
+    let out = m.message(topic::LEASE, &lease(ME, false, 0), 2_100);
+    assert_eq!(logs(&out)[0]["seconds"], json!(2.0));
+}
+
+#[test]
+fn a_plug_reports_increments_that_sum_to_the_total_exactly_once() {
+    let mut m = plug_with(1_000, false);
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 0);
+    let mut all: Vec<Value> = Vec::new();
+    for t in [1_000, 2_000, 2_500, 3_000] {
+        all.extend(logs(&m.tick(t)));
+    }
+    all.extend(logs(&m.message(topic::LEASE, &lease(ME, false, 0), 3_500)));
+    assert_eq!(all.len(), 4, "{all:?}");
+    let sum: f64 = all.iter().map(|l| l["seconds"].as_f64().unwrap()).sum();
+    assert!(
+        (sum - 3.5).abs() < 1e-9,
+        "increments summed to {sum}, not 3.5"
+    );
+    assert!(all.iter().all(|l| l.get("card").is_none()), "{all:?}");
+}
+
+#[test]
+fn a_plug_with_a_sensor_reports_both_figures_with_no_card() {
+    let mut m = plug_with(0, true);
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 0);
+    m.running(true, 1_000);
+    m.running(false, 3_000);
+    let out = m.message(topic::LEASE, &lease(ME, false, 0), 4_000);
+    let log = &logs(&out)[0];
+    assert!(log.get("card").is_none(), "{log}");
+    assert_eq!(
+        log["seconds"],
+        json!(2.0),
+        "with a sensor the figure is the machine working"
+    );
+    assert_eq!(log["active_seconds"], json!(2.0));
+}
+
+#[test]
+fn a_plug_never_energized_reports_nothing() {
+    let mut m = plug_with(1_000, false);
+    m.message(topic::LEASE, &lease(ME, false, 0), 100);
+    let mut all: Vec<Value> = Vec::new();
+    for t in [1_000, 2_000, 5_000] {
+        all.extend(logs(&m.tick(t)));
+    }
+    assert!(
+        all.is_empty(),
+        "a plug that was never on reported usage: {all:?}"
     );
 }
 
