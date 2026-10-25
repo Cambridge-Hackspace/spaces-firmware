@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 use spaces_device::wire::topic;
-use spaces_device::{Action, Activity, Config, EndReason, Module, Outcome, Output};
+use spaces_device::{Action, Activity, Config, EndReason, Module, Outcome, Output, Usage};
 
 const ME: &str = "dev-uuid-me";
 const TOOL: &str = "laser-01";
@@ -1352,6 +1352,95 @@ fn a_plug_has_no_activity_of_its_own() {
     m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
     assert!(m.tool_is_on());
     assert_eq!(m.activity(), Activity::Idle);
+}
+
+// ------------------------------------------------- usage, for a panel
+//
+// A member metered by the second should be able to watch the figure. These
+// arms pin what a panel may show: a figure only where something measures one,
+// the HELD figure (what bills by default), and a running flag that follows the
+// bridged signal rather than the raw one.
+
+#[test]
+fn only_a_device_that_senses_the_machine_offers_a_usage_figure() {
+    // No sensor: no figure, in a session or out of one. A panel that showed
+    // "0:00:00" over a machine nothing is measuring would be inventing it.
+    let m = alice_reading(module());
+    assert_eq!(
+        m.usage(500),
+        None,
+        "a device with no sensor offered a figure"
+    );
+
+    // Sensing, but no session: nothing to count.
+    let mut m = sensing(0, 0, 0);
+    assert_eq!(m.usage(0), None);
+    m.swipe(ALICE, 0);
+    assert_eq!(m.usage(50), None, "a figure before the yes");
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    assert_eq!(
+        m.usage(100),
+        Some(Usage {
+            running: false,
+            seconds: 0
+        })
+    );
+}
+
+#[test]
+fn the_usage_figure_is_the_held_one_and_follows_the_bridged_signal() {
+    // hold 2 s: the machine pausing for less than that is still "running",
+    // on the panel exactly as in the figure that bills.
+    let mut m = sensing(0, 2_000, 0);
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 200);
+
+    m.running(true, 1_000);
+    m.tick(4_000);
+    assert_eq!(
+        m.usage(4_000),
+        Some(Usage {
+            running: true,
+            seconds: 3
+        })
+    );
+
+    // The raw signal drops; inside the hold the panel still says running and
+    // the figure still climbs.
+    m.running(false, 4_000);
+    m.tick(5_000);
+    assert_eq!(
+        m.usage(5_000),
+        Some(Usage {
+            running: true,
+            seconds: 4
+        }),
+        "the panel flickered on a pause the bill bridges"
+    );
+
+    // Past the hold: stopped, and the figure holds where the bridge ended
+    // (1 s -> 6 s = 5 s), not where the raw signal dropped. The release is
+    // noticed on a tick, so the figure resolves to the poll interval -- a box
+    // polls every 75 ms; this test polls at the boundary.
+    m.tick(6_000);
+    m.tick(7_000);
+    assert_eq!(
+        m.usage(7_000),
+        Some(Usage {
+            running: false,
+            seconds: 5
+        })
+    );
+    m.tick(9_000);
+    assert_eq!(
+        m.usage(9_000).map(|u| u.seconds),
+        Some(5),
+        "idle time counted"
+    );
+
+    // Reading is not reporting: asking twice changes nothing.
+    assert_eq!(m.usage(9_000), m.usage(9_000));
 }
 
 // ------------------------------------------------- the pulse (CS:S #170)

@@ -125,6 +125,23 @@ pub enum Activity {
     Session { energized: bool },
 }
 
+/// Usage so far in the open session, for a panel.
+///
+/// A member metered by the second should be able to see the figure while it
+/// runs, and see it stop when the machine does: a panel that said only
+/// "Signed in" over a running meter was asking to be trusted rather than read.
+/// Only a device that senses the machine has one; see [`Module::usage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    /// Whether the machine counts as working right now. This is the **held**
+    /// signal -- gaps bridged by the run filter -- so it does not flicker at
+    /// scan-line rate on a laser.
+    pub running: bool,
+    /// The held figure so far, whole seconds: what `tool-log`'s `seconds`
+    /// carries. Which figure the server bills is its setting, not this one.
+    pub seconds: u64,
+}
+
 /// What a module needs to know about itself.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -434,6 +451,26 @@ impl Module {
             Phase::Session(_) => Activity::Session {
                 energized: self.tool_on,
             },
+        }
+    }
+
+    /// How much the open session has used so far, as of `now`, for a panel.
+    ///
+    /// `None` outside a session, and `None` always on a device that does not
+    /// sense the machine: it has no figure, and a panel must not invent one.
+    /// Non-mutating, like [`Session::totals`]; the caller is expected to have
+    /// ticked to `now` first, since the hold releases only when something
+    /// notices.
+    pub fn usage(&self, now: u64) -> Option<Usage> {
+        if !self.config.senses_running {
+            return None;
+        }
+        match &self.phase {
+            Phase::Session(session) => Some(Usage {
+                running: session.running_since.is_some(),
+                seconds: session.totals(now).0 / 1000,
+            }),
+            _ => None,
         }
     }
 
