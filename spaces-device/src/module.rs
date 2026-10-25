@@ -184,6 +184,14 @@ pub struct Config {
     /// are safe and a reboot then costs one interval instead of the whole
     /// session. Not the default, because it changes how often a module talks.
     pub usage_interval_ms: u64,
+    /// Whether this device reports usage at all. Default `true`.
+    ///
+    /// `false` for a device that must not meter: a second plug on a tool another
+    /// device already meters -- an extractor that follows the laser's lease --
+    /// would otherwise report the same minutes again, and reports accumulate.
+    /// Everything else is unchanged: the session, the lease, `tool-off`, the
+    /// heartbeats. Only `tool-log` is withheld.
+    pub reports_usage: bool,
     /// Whether this device switches the tool's power.
     ///
     /// **This is the difference between a session and an energized output, and
@@ -263,6 +271,7 @@ impl Config {
             use_hold_ms: 0,
             senses_running: false,
             usage_interval_ms: 0,
+            reports_usage: true,
             // A power module, as every caller of this constructor was before
             // the flag existed. Behaviour is unchanged for all of them.
             gates_power: true,
@@ -794,8 +803,19 @@ impl Module {
             _ => None,
         };
         if let Some((card, d_held, d_raw)) = due {
-            out.push(self.usage_action(card.as_deref(), d_held, d_raw));
+            self.report_usage(out, card.as_deref(), d_held, d_raw);
         }
+    }
+
+    /// Publish a usage increment -- unless this device is configured not to
+    /// meter ([`Config::reports_usage`]), in which case nothing goes out and
+    /// the clocks are simply never read. The one gate for all three callers:
+    /// the periodic report, a session's end, a plug's meter closing.
+    fn report_usage(&self, out: &mut Vec<Action>, card: Option<&str>, held_ms: u64, raw_ms: u64) {
+        if !self.config.reports_usage {
+            return;
+        }
+        out.push(self.usage_action(card, held_ms, raw_ms));
     }
 
     /// One `tool-log`, carrying an increment of each figure.
@@ -993,7 +1013,7 @@ impl Module {
         // server's accumulation but is pure noise on the broker and a row in
         // the audit log for every session.
         if !(reported_before && d_held == 0 && d_raw == 0) {
-            out.push(self.usage_action(Some(&card), d_held, d_raw));
+            self.report_usage(out, Some(&card), d_held, d_raw);
         }
         out.push(self.request(topic::TOOL_OFF_REQUEST, &card));
         // After the release, not before: the panel saying "session ended" while
@@ -1080,7 +1100,7 @@ impl Module {
                     // The same rule as a session's end: skipped only when a
                     // periodic report already went out AND nothing is left.
                     if !(reported_before && d_held == 0 && d_raw == 0) {
-                        out.push(self.usage_action(None, d_held, d_raw));
+                        self.report_usage(out, None, d_held, d_raw);
                     }
                 }
                 (None, false) => {}

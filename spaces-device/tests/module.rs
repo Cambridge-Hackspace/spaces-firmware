@@ -1502,6 +1502,74 @@ fn a_plug_has_no_activity_of_its_own() {
     assert_eq!(m.activity(), Activity::Idle);
 }
 
+// ------------------------------------------------- a device that does not meter
+//
+// A second plug on a tool another device already meters -- an extractor that
+// follows the laser's lease -- must switch, pulse, and release exactly as any
+// other, and never send a tool-log: reports accumulate, and it would count the
+// same minutes twice.
+
+#[test]
+fn a_device_configured_not_to_report_usage_still_stops_cleanly_and_sends_no_log() {
+    let mut c = Config::new(ME, TOOL);
+    c.senses_running = true;
+    c.usage_interval_ms = 1_000;
+    c.reports_usage = false;
+    let mut m = Module::new(c);
+    m.start(0);
+    m.swipe(ALICE, 0);
+    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 200);
+    m.running(true, 1_000);
+    let mut periodic: Vec<Value> = Vec::new();
+    for t in [2_000, 3_000, 4_000] {
+        periodic.extend(logs(&m.tick(t)));
+    }
+    assert!(
+        periodic.is_empty(),
+        "a periodic report went out: {periodic:?}"
+    );
+    let out = m.tool_off(5_000);
+    assert_eq!(
+        publishes_to(&out),
+        vec![topic::TOOL_OFF_REQUEST],
+        "the stop must still release the tool, and only that: {out:?}"
+    );
+    assert!(!m.tool_is_on(), "the relay stayed closed");
+}
+
+#[test]
+fn a_plug_configured_not_to_report_usage_follows_its_lease_in_silence() {
+    // The extractor-plug case, and the point is that nothing else about it
+    // moves.
+    let mut c = Config::power_only(ME, TOOL);
+    c.usage_interval_ms = 1_000;
+    c.reports_usage = false;
+    let mut m = Module::new(c);
+    m.start(0);
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    assert!(
+        m.tool_is_on(),
+        "a plug that does not meter must still energize"
+    );
+    let mut all: Vec<Value> = Vec::new();
+    for t in [1_200, 2_200] {
+        all.extend(logs(&m.tick(t)));
+    }
+    let out = m.tick(3_100);
+    all.extend(logs(&out));
+    assert!(!m.tool_is_on(), "and still drop at the cut");
+    assert!(
+        all.is_empty(),
+        "a plug that does not meter reported: {all:?}"
+    );
+    // The heartbeats are untouched: this device is still alive to the edge.
+    assert!(
+        !published(&m.tick(4_100), topic::ALIVE_REQUEST).is_empty(),
+        "the pulse stopped with the metering"
+    );
+}
+
 // ------------------------------------------------- usage, for a panel
 //
 // A member metered by the second should be able to watch the figure. These
