@@ -1493,6 +1493,28 @@ fn a_plug_never_energized_reports_nothing() {
 }
 
 #[test]
+fn a_plugs_stop_releases_the_tool_without_a_card() {
+    // A stop is a safety act and needs no badge (CS:S #179). A plug has no
+    // session and no card; its stop names the tool alone, and the server ends
+    // whatever session is open there. The plug does not switch itself off --
+    // the lease that follows is withdrawn, and that is what cuts it.
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 60_000), 100);
+    let out = m.tool_off(1_000);
+    assert_eq!(publishes_to(&out), vec![topic::TOOL_OFF_REQUEST], "{out:?}");
+    let req = &published(&out, topic::TOOL_OFF_REQUEST)[0];
+    assert!(
+        req.get("card").is_none(),
+        "a plug named a card it cannot know: {req}"
+    );
+    assert_eq!(req["tool_id"], TOOL);
+    assert!(
+        m.tool_is_on(),
+        "a plug must not cut itself on a stop; the lease decides"
+    );
+}
+
+#[test]
 fn a_plug_has_no_activity_of_its_own() {
     // It owns no session; its relay is `tool_is_on`. A panel on a plug would
     // be showing the tool's state, not a member's session.

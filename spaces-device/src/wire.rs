@@ -39,9 +39,15 @@ pub mod topic {
 }
 
 /// `toolguard/request/tool-on` and `toolguard/request/tool-off`.
+///
+/// `card` is always present on a tool-on: it names who is asking. On a
+/// tool-off it is **optional** (CS:S #179): a stop is a safety act and needs no
+/// badge, so a device with no card -- a plug with a stop button -- names the
+/// tool alone, and the server ends whatever session is open on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolRequest {
-    pub card: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
     pub tool_id: String,
 }
 

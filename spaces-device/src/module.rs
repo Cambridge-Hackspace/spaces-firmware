@@ -597,7 +597,7 @@ impl Module {
         match &self.phase {
             Phase::Idle { .. } => {
                 out.push(Action::Note(format!("asking the edge about card {card}")));
-                out.push(self.request(topic::TOOL_ON_REQUEST, card));
+                out.push(self.request(topic::TOOL_ON_REQUEST, Some(card)));
                 self.phase = Phase::Asking {
                     card: card.to_string(),
                     since: now,
@@ -636,10 +636,22 @@ impl Module {
     }
 
     /// The person pressed stop.
+    ///
+    /// On a device with a session, the session ends with the card that opened
+    /// it. On a plug there is no session and no card, and the stop still goes
+    /// out -- `tool-off` naming the tool alone (CS:S #179): a stop is a safety
+    /// act, and the server ends whatever session is open on the tool. The plug
+    /// itself switches off when the lease that follows is withdrawn.
     pub fn tool_off(&mut self, now: u64) -> Vec<Action> {
         let mut out = self.advance(now);
         match self.phase {
             Phase::Session(_) => self.end(EndReason::ToolOff, now, &mut out),
+            _ if !self.config.reads_cards => {
+                out.push(Action::Note(
+                    "stop pressed; releasing the tool without a card".into(),
+                ));
+                out.push(self.request(topic::TOOL_OFF_REQUEST, None));
+            }
             _ => out.push(Action::Note(
                 "tool off pressed, but no session is open".into(),
             )),
@@ -917,7 +929,7 @@ impl Module {
                 out.push(Action::Note(format!(
                     "a late yes for card {card} arrived after giving up; releasing the tool"
                 )));
-                out.push(self.request(topic::TOOL_OFF_REQUEST, &card));
+                out.push(self.request(topic::TOOL_OFF_REQUEST, Some(&card)));
                 self.phase = Phase::Idle { abandoned: None };
             }
             _ => {
@@ -1015,7 +1027,7 @@ impl Module {
         if !(reported_before && d_held == 0 && d_raw == 0) {
             self.report_usage(out, Some(&card), d_held, d_raw);
         }
-        out.push(self.request(topic::TOOL_OFF_REQUEST, &card));
+        out.push(self.request(topic::TOOL_OFF_REQUEST, Some(&card)));
         // After the release, not before: the panel saying "session ended" while
         // the tool is still energized is the one ordering a member could act on
         // and be wrong about.
@@ -1191,9 +1203,9 @@ impl Module {
         });
     }
 
-    fn request(&self, topic_name: &'static str, card: &str) -> Action {
+    fn request(&self, topic_name: &'static str, card: Option<&str>) -> Action {
         let request = ToolRequest {
-            card: card.to_string(),
+            card: card.map(str::to_string),
             tool_id: self.config.tool_id.clone(),
         };
         Action::Publish {
