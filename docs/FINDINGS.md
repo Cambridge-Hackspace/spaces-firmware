@@ -1,5 +1,12 @@
 # What FIRMWARE.md did not say
 
+> **Topic names below are history (0.4, CS:S #182).** This firmware now speaks
+> the resource-shaped wire -- `resource/request/scan`, `resource/response/scan`,
+> `resource/lease` and so on, every payload naming the `resource` -- and the
+> `toolguard/*` names quoted in these notes are the edge's deprecated aliases
+> for them. The findings themselves still hold: they are about the shapes, not
+> the names.
+
 This firmware was written from the platform's `FIRMWARE.md` alone, on purpose,
 without reading the platform's source. The point was a fresh read: everything
 a firmware author would have to guess, and everything they would get wrong by

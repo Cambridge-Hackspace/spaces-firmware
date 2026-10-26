@@ -55,10 +55,10 @@
 
 use crate::run_filter::RunFilter;
 use crate::wire::{
-    topic, AliveRequest, Lease, PowerReport, ToolLogRequest, ToolOnReply, ToolRequest,
+    topic, AliveRequest, Lease, PowerReport, ScanReply, ScanRequest, StopRequest, UsageReport,
 };
 
-/// The two outputs a module drives.
+/// The outputs a module drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Output {
     /// The tool's power: a relay in a real module, an LED in the demo.
@@ -66,6 +66,10 @@ pub enum Output {
     /// The machine actually working, e.g. a laser firing. Can only be on while
     /// the tool is.
     Running,
+    /// A door's latch (CS:S #182): energized for exactly the pulse the edge
+    /// named in its yes, then released. Never held by a lease and never on for
+    /// a session -- a latch released for a moment is what a door is.
+    Strike,
 }
 
 /// What the firmware must do. Apply them in order.
@@ -157,10 +161,9 @@ pub struct Config {
     /// How often to send a power report. Must be well inside the edge's
     /// offline threshold (`module_offline_ms`, 5 s in the reference edge).
     pub heartbeat_interval_ms: u64,
-    /// Draw to report while energized and idle, and while running. Strings,
-    /// as on the wire.
-    pub draw_idle: String,
-    pub draw_running: String,
+    /// Draw to report while energized and idle, and while running, in amps.
+    pub draw_idle: f64,
+    pub draw_running: f64,
     /// Conditioning for the running input: how long it must hold before usage
     /// starts, and how long usage persists after it drops. Both `0` is
     /// passthrough, which is exactly the behaviour that predates this field.
@@ -233,6 +236,24 @@ pub struct Config {
     /// re-taps, nothing senses the machine, and there is no lease to lapse.
     /// Without it a reader-only device can still strand a tool.
     pub max_session_ms: u64,
+    /// Whether this device drives a door's latch (CS:S #182).
+    ///
+    /// `true` is a device bound to the resource in the `strike` role: on a yes
+    /// whose reply carries `strike.pulse_ms`, it energizes [`Output::Strike`]
+    /// for exactly that long and then releases it. The pulse is the edge's to
+    /// name -- it is the resource's strike binding's profile, set by an
+    /// administrator -- so a device with this flag and a yes with no `strike`
+    /// releases nothing and says so.
+    ///
+    /// A latch is not a relay. It is never leased, never held for a session,
+    /// and the session it belongs to is the resource's, not this device's: on
+    /// a device that drives a latch and gates no power the session is over
+    /// when the pulse is ([`EndReason::StrikePulsed`]), and it sends no stop
+    /// for it -- a door held open until somebody stops it is the edge's
+    /// session to end, and this device's stop button sends that stop. A device
+    /// that drives a latch *and* gates power -- a room in one box -- keeps the
+    /// tool's session rules for its relay and pulses the latch alongside.
+    pub drives_latch: bool,
     /// Whether this device reads cards, and so owns the session.
     ///
     /// `true` is a device with a reader: a swipe asks the edge, the answer
@@ -262,8 +283,8 @@ impl Config {
             reply_timeout_ms: 5_000,
             first_lease_timeout_ms: 5_000,
             heartbeat_interval_ms: 1_000,
-            draw_idle: "0.3".into(),
-            draw_running: "4.2".into(),
+            draw_idle: 0.3,
+            draw_running: 4.2,
             // Passthrough, no sensing claimed, one report at the end: a module
             // built from `new` and nothing else behaves exactly as it did
             // before any of this existed.
@@ -278,7 +299,24 @@ impl Config {
             stop_on_second_tap: false,
             idle_end_ms: 0,
             max_session_ms: 0,
+            drives_latch: false,
             reads_cards: true,
+        }
+    }
+
+    /// A door box: reads cards, drives a latch, switches no power and meters
+    /// nothing (CS:S #182).
+    ///
+    /// Its session is the pulse: it opens on the yes, the latch is released for
+    /// the pulse the edge named, and the session is over when the pulse is. The
+    /// resource's own session -- a door held until a stop, with power bindings
+    /// of its own -- is the edge's, and this box's stop button ends it.
+    pub fn drives_a_latch(device_id: impl Into<String>, resource: impl Into<String>) -> Self {
+        Config {
+            gates_power: false,
+            drives_latch: true,
+            reports_usage: false,
+            ..Config::new(device_id, resource)
         }
     }
 
@@ -461,6 +499,9 @@ pub enum EndReason {
     Idle,
     /// [`Config::max_session_ms`] elapsed. The backstop, not a normal stop.
     MaxSession,
+    /// The latch pulse ended, on a device whose session is the pulse (CS:S
+    /// #182). Not a stop: nothing is sent for it.
+    StrikePulsed,
 }
 
 /// What time passing has made due. Decided first, then acted on, so the
@@ -490,6 +531,9 @@ pub struct Module {
     /// The outputs as last set, so only changes are emitted.
     tool_on: bool,
     running_on: bool,
+    strike_on: bool,
+    /// Until when the latch is released (CS:S #182). `None` when it is not.
+    strike_until: Option<u64>,
     last_report: Option<u64>,
 }
 
@@ -504,8 +548,15 @@ impl Module {
             standing_meter: None,
             tool_on: false,
             running_on: false,
+            strike_on: false,
+            strike_until: None,
             last_report: None,
         }
+    }
+
+    /// Whether the latch is released, as last set.
+    pub fn strike_is_on(&self) -> bool {
+        self.strike_on
     }
 
     pub fn config(&self) -> &Config {
@@ -571,12 +622,20 @@ impl Module {
                 on: false,
             });
         }
+        if self.config.drives_latch {
+            out.push(Action::Set {
+                output: Output::Strike,
+                on: false,
+            });
+        }
         out.push(Action::Set {
             output: Output::Running,
             on: false,
         });
         self.tool_on = false;
         self.running_on = false;
+        self.strike_on = false;
+        self.strike_until = None;
         self.heartbeat(now, &mut out);
         out
     }
@@ -597,7 +656,7 @@ impl Module {
         match &self.phase {
             Phase::Idle { .. } => {
                 out.push(Action::Note(format!("asking the edge about card {card}")));
-                out.push(self.request(topic::TOOL_ON_REQUEST, Some(card)));
+                out.push(self.scan_request(card));
                 self.phase = Phase::Asking {
                     card: card.to_string(),
                     since: now,
@@ -646,15 +705,18 @@ impl Module {
         let mut out = self.advance(now);
         match self.phase {
             Phase::Session(_) => self.end(EndReason::ToolOff, now, &mut out),
-            _ if !self.config.reads_cards => {
+            // No session of this device's own -- a plug, or a door box whose
+            // session was the pulse -- and the stop still goes out, naming the
+            // resource alone (CS:S #179, #182): a stop is a safety act, the
+            // server and the edge end whatever session is open on the
+            // resource, and a stop that lands on nothing is harmless. This is
+            // how a door box's stop button ends the room it opened.
+            _ => {
                 out.push(Action::Note(
-                    "stop pressed; releasing the tool without a card".into(),
+                    "stop pressed; releasing the resource without a card".into(),
                 ));
-                out.push(self.request(topic::TOOL_OFF_REQUEST, None));
+                out.push(self.stop_request(None));
             }
-            _ => out.push(Action::Note(
-                "tool off pressed, but no session is open".into(),
-            )),
         }
         out
     }
@@ -676,10 +738,10 @@ impl Module {
     pub fn message(&mut self, topic_name: &str, payload: &[u8], now: u64) -> Vec<Action> {
         let mut out = self.advance(now);
         match topic_name {
-            topic::TOOL_ON_RESPONSE => self.on_reply(payload, now, &mut out),
+            topic::SCAN_RESPONSE => self.on_reply(payload, now, &mut out),
             topic::LEASE => self.on_lease(payload, now, &mut out),
             // Acknowledgements. Not instructions, and never a reason to stay on.
-            topic::TOOL_OFF_RESPONSE | topic::TOOL_LOG_RESPONSE | topic::POWER_RESPONSE => {}
+            topic::STOP_RESPONSE | topic::USAGE_RESPONSE | topic::POWER_RESPONSE => {}
             other => out.push(Action::Note(format!("ignoring message on {other}"))),
         }
         out
@@ -715,6 +777,15 @@ impl Module {
         let open_for = now.saturating_sub(session.authorized_at);
         if self.config.max_session_ms > 0 && open_for >= self.config.max_session_ms {
             return Due::End(EndReason::MaxSession);
+        }
+        // A device whose session is the pulse (CS:S #182): over when the latch
+        // is released again -- or at once, when the yes named no pulse.
+        if self.config.drives_latch && !self.config.gates_power {
+            match self.strike_until {
+                Some(until) if now >= until => return Due::End(EndReason::StrikePulsed),
+                Some(_) => {}
+                None => return Due::End(EndReason::StrikePulsed),
+            }
         }
         if self.config.gates_power {
             match session.lease_until {
@@ -838,21 +909,21 @@ impl Module {
     /// omitted by a plug, which never learns one: the server attributes the
     /// usage to whoever is signed on to the tool (CS:S #174).
     fn usage_action(&self, card: Option<&str>, held_ms: u64, raw_ms: u64) -> Action {
-        let log = ToolLogRequest {
+        let log = UsageReport {
+            resource: self.config.tool_id.clone(),
             card: card.map(str::to_string),
-            tool_id: self.config.tool_id.clone(),
             seconds: held_ms as f64 / 1000.0,
             active_seconds: self.config.senses_running.then_some(raw_ms as f64 / 1000.0),
             temperature: None,
         };
         Action::Publish {
-            topic: topic::TOOL_LOG_REQUEST,
-            payload: serde_json::to_string(&log).expect("a ToolLogRequest always serializes"),
+            topic: topic::USAGE_REQUEST,
+            payload: serde_json::to_string(&log).expect("a UsageReport always serializes"),
         }
     }
 
     fn on_reply(&mut self, payload: &[u8], now: u64, out: &mut Vec<Action>) {
-        let reply: Option<ToolOnReply> = serde_json::from_slice(payload).ok();
+        let reply: Option<ScanReply> = serde_json::from_slice(payload).ok();
 
         // IS IT MINE, BEFORE IS IT YES (CS:S #166). Every module on the local
         // broker receives every answer on this topic -- it is unnamespaced and
@@ -869,8 +940,8 @@ impl Module {
             if !r.is_for(&self.config.tool_id) {
                 if matches!(self.phase, Phase::Asking { .. }) {
                     out.push(Action::Note(format!(
-                        "ignoring a tool-on answer about {} -- this module asked about {}",
-                        r.tool_id.as_deref().unwrap_or("?"),
+                        "ignoring a scan answer about {} -- this module asked about {}",
+                        r.named().unwrap_or("?"),
                         self.config.tool_id
                     )));
                 }
@@ -883,9 +954,34 @@ impl Module {
                 let card = card.clone();
                 match reply {
                     Some(reply) if reply.is_yes() => {
-                        out.push(Action::Note(format!(
-                            "card {card} authorized; waiting for a lease before switching on"
-                        )));
+                        out.push(Action::Note(if self.config.gates_power {
+                            format!(
+                                "card {card} authorized; waiting for a lease before switching on"
+                            )
+                        } else {
+                            format!("card {card} authorized")
+                        }));
+                        // The latch (CS:S #182): released for the pulse the
+                        // edge named, which is the resource's strike binding's
+                        // profile. A device that drives one and is told no
+                        // pulse releases nothing -- the resource has no strike
+                        // binding, and that is worth saying rather than
+                        // guessing a duration.
+                        if self.config.drives_latch {
+                            match reply.pulse_ms() {
+                                Some(pulse) => {
+                                    out.push(Action::Note(format!(
+                                        "releasing the latch for {pulse} ms"
+                                    )));
+                                    self.strike_until = Some(now.saturating_add(pulse));
+                                }
+                                None => out.push(Action::Note(
+                                    "authorized, but the edge named no pulse; does this \
+                                     resource have a strike binding?"
+                                        .into(),
+                                )),
+                            }
+                        }
                         out.push(Action::Outcome(Outcome::Authorized));
                         self.phase = Phase::Session(Session {
                             card,
@@ -894,6 +990,7 @@ impl Module {
                             meter: Meter::open(now),
                             idle_since: Some(now),
                         });
+                        self.update_outputs(now, out);
                     }
                     Some(reply) => {
                         out.push(Action::Note(format!(
@@ -929,7 +1026,7 @@ impl Module {
                 out.push(Action::Note(format!(
                     "a late yes for card {card} arrived after giving up; releasing the tool"
                 )));
-                out.push(self.request(topic::TOOL_OFF_REQUEST, Some(&card)));
+                out.push(self.stop_request(Some(&card)));
                 self.phase = Phase::Idle { abandoned: None };
             }
             _ => {
@@ -1007,6 +1104,7 @@ impl Module {
         self.update_outputs(now, out);
 
         out.push(Action::Note(match why {
+            EndReason::StrikePulsed => "the latch is closed again".to_string(),
             EndReason::ToolOff => "tool off".to_string(),
             EndReason::LeaseExpired => "the lease ran out; switching off".to_string(),
             EndReason::LeaseRefused => "the edge withdrew the lease; switching off".to_string(),
@@ -1020,6 +1118,13 @@ impl Module {
                 "the maximum session time elapsed; releasing the tool".to_string()
             }
         }));
+        // A session that was the pulse reports nothing and stops nothing (CS:S
+        // #182): there was no usage, and the resource's session -- a door
+        // held until somebody stops it -- is not this device's to end.
+        if why == EndReason::StrikePulsed {
+            out.push(Action::Outcome(Outcome::Ended(why)));
+            return;
+        }
         // Skipped only when a periodic report has already gone out AND there is
         // nothing left to add. Sending the zero anyway would be harmless to the
         // server's accumulation but is pure noise on the broker and a row in
@@ -1027,7 +1132,7 @@ impl Module {
         if !(reported_before && d_held == 0 && d_raw == 0) {
             self.report_usage(out, Some(&card), d_held, d_raw);
         }
-        out.push(self.request(topic::TOOL_OFF_REQUEST, Some(&card)));
+        out.push(self.stop_request(Some(&card)));
         // After the release, not before: the panel saying "session ended" while
         // the tool is still energized is the one ordering a member could act on
         // and be wrong about.
@@ -1150,6 +1255,23 @@ impl Module {
                 on: true,
             });
         }
+
+        // The latch (CS:S #182): released exactly while its pulse lasts, read
+        // off the clock on every pass like a lease, so it closes on whatever
+        // call comes next. Only a device that drives one has the output.
+        if self.config.drives_latch {
+            let strike = self.strike_until.is_some_and(|until| now < until);
+            if !strike {
+                self.strike_until = None;
+            }
+            if strike != self.strike_on {
+                self.strike_on = strike;
+                out.push(Action::Set {
+                    output: Output::Strike,
+                    on: strike,
+                });
+            }
+        }
     }
 
     fn heartbeat(&mut self, now: u64, out: &mut Vec<Action>) {
@@ -1161,14 +1283,14 @@ impl Module {
         }
         self.last_report = Some(now);
         let draw = if self.running_on {
-            &self.config.draw_running
+            self.config.draw_running
         } else if self.tool_on {
-            &self.config.draw_idle
+            self.config.draw_idle
         } else {
-            "0.0"
+            0.0
         };
         let report = PowerReport {
-            tool_id: self.config.tool_id.clone(),
+            resource: self.config.tool_id.clone(),
             device_id: Some(self.config.device_id.clone()),
             // A device that switches nothing has no draw to report and no
             // relay to report on. `None` is "cannot tell", which the bypass
@@ -1179,7 +1301,7 @@ impl Module {
             // The report still goes out: it is the plug's telemetry, and it
             // counts as being alive too for edges that predate the pulse. The
             // pulse below is the liveness contract proper (CS:S #170).
-            draw_now: self.config.gates_power.then(|| draw.to_string()),
+            draw_now: self.config.gates_power.then_some(draw),
             voltage_now: None,
             relay_on: self.config.gates_power.then_some(self.tool_on),
             self_tripped: None,
@@ -1203,14 +1325,25 @@ impl Module {
         });
     }
 
-    fn request(&self, topic_name: &'static str, card: Option<&str>) -> Action {
-        let request = ToolRequest {
-            card: card.map(str::to_string),
-            tool_id: self.config.tool_id.clone(),
+    fn scan_request(&self, card: &str) -> Action {
+        let request = ScanRequest {
+            resource: self.config.tool_id.clone(),
+            card: card.to_string(),
         };
         Action::Publish {
-            topic: topic_name,
-            payload: serde_json::to_string(&request).expect("a ToolRequest always serializes"),
+            topic: topic::SCAN_REQUEST,
+            payload: serde_json::to_string(&request).expect("a ScanRequest always serializes"),
+        }
+    }
+
+    fn stop_request(&self, card: Option<&str>) -> Action {
+        let request = StopRequest {
+            resource: self.config.tool_id.clone(),
+            card: card.map(str::to_string),
+        };
+        Action::Publish {
+            topic: topic::STOP_REQUEST,
+            payload: serde_json::to_string(&request).expect("a StopRequest always serializes"),
         }
     }
 }

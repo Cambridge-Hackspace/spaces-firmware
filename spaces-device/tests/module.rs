@@ -51,7 +51,7 @@ fn yes() -> Vec<u8> {
 }
 
 fn lease(device: &str, grant: bool, ttl_ms: u64) -> Vec<u8> {
-    json!({"tool_id": "7c9e6679-uuid", "device_id": device, "grant": grant, "ttl_ms": ttl_ms})
+    json!({"resource": "7c9e6679-uuid", "device_id": device, "grant": grant, "ttl_ms": ttl_ms})
         .to_string()
         .into_bytes()
 }
@@ -60,7 +60,7 @@ fn lease(device: &str, grant: bool, ttl_ms: u64) -> Vec<u8> {
 fn alice_running_tool() -> Module {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(m.tool_is_on(), "setup: Alice's tool should be on");
     m
@@ -75,7 +75,7 @@ fn alice_running_sensed_tool() -> Module {
     let mut m = Module::new(c);
     m.start(0);
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(m.tool_is_on(), "setup: Alice's tool should be on");
     m
@@ -108,8 +108,8 @@ fn a_swipe_asks_the_edge_with_the_card_and_tool() {
     let mut m = module();
     let out = m.swipe(ALICE, 0);
     assert_eq!(
-        published(&out, topic::TOOL_ON_REQUEST),
-        vec![json!({"card": ALICE, "tool_id": TOOL})]
+        published(&out, topic::SCAN_REQUEST),
+        vec![json!({"resource": TOOL, "card": ALICE})]
     );
     assert!(!m.tool_is_on());
 }
@@ -118,7 +118,7 @@ fn a_swipe_asks_the_edge_with_the_card_and_tool() {
 fn a_yes_alone_does_not_switch_on() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     assert!(!m.tool_is_on(), "authorized but not yet leased");
 }
 
@@ -126,7 +126,7 @@ fn a_yes_alone_does_not_switch_on() {
 fn a_yes_and_a_lease_switch_on() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     let out = m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(out.contains(&Action::Set {
         output: Output::Tool,
@@ -147,12 +147,12 @@ fn a_lease_alone_does_not_switch_on() {
 fn a_yes_with_no_lease_gives_up_and_releases_the_tool() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     let out = m.tick(100 + 5000);
     assert!(!m.tool_is_on());
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST],
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST],
         "the session the edge opened is closed again"
     );
 }
@@ -164,7 +164,7 @@ fn ok_without_a_yes_is_a_no() {
     // The fail-open reading FIRMWARE.md warns about.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, br#"{"status":"ok"}"#, 100);
+    m.message(topic::SCAN_RESPONSE, br#"{"status":"ok"}"#, 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(!m.tool_is_on());
 }
@@ -174,7 +174,7 @@ fn an_explicit_refusal_is_a_no() {
     let mut m = module();
     m.swipe(BOB, 0);
     let out = m.message(
-        topic::TOOL_ON_RESPONSE,
+        topic::SCAN_RESPONSE,
         br#"{"authorized":false,"reason":"Unknown card"}"#,
         100,
     );
@@ -192,7 +192,7 @@ fn the_documented_envelope_is_understood_too() {
     let mut m = module();
     m.swipe(ALICE, 0);
     m.message(
-        topic::TOOL_ON_RESPONSE,
+        topic::SCAN_RESPONSE,
         br#"{"status":"ok","tool_on":true}"#,
         100,
     );
@@ -205,7 +205,7 @@ fn a_refusal_in_the_documented_envelope_is_a_no() {
     let mut m = module();
     m.swipe(BOB, 0);
     m.message(
-        topic::TOOL_ON_RESPONSE,
+        topic::SCAN_RESPONSE,
         br#"{"status":"error","message":"Training required","tool_on":false}"#,
         100,
     );
@@ -218,7 +218,7 @@ fn any_explicit_no_beats_a_yes() {
     let mut m = module();
     m.swipe(ALICE, 0);
     m.message(
-        topic::TOOL_ON_RESPONSE,
+        topic::SCAN_RESPONSE,
         br#"{"authorized":true,"tool_on":false}"#,
         100,
     );
@@ -230,7 +230,7 @@ fn any_explicit_no_beats_a_yes() {
 fn an_answer_that_does_not_parse_is_a_no() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, b"yes please", 100);
+    m.message(topic::SCAN_RESPONSE, b"yes please", 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(!m.tool_is_on());
 }
@@ -249,10 +249,10 @@ fn a_late_yes_after_giving_up_is_released_not_used() {
     let mut m = module();
     m.swipe(ALICE, 0);
     m.tick(5000); // gave up
-    let out = m.message(topic::TOOL_ON_RESPONSE, &yes(), 6000);
+    let out = m.message(topic::SCAN_RESPONSE, &yes(), 6000);
     assert_eq!(
-        published(&out, topic::TOOL_OFF_REQUEST),
-        vec![json!({"card": ALICE, "tool_id": TOOL})]
+        published(&out, topic::STOP_REQUEST),
+        vec![json!({"resource": TOOL, "card": ALICE})]
     );
     m.message(topic::LEASE, &lease(ME, true, 3000), 6100);
     assert!(!m.tool_is_on());
@@ -262,7 +262,7 @@ fn a_late_yes_after_giving_up_is_released_not_used() {
 fn an_answer_nobody_asked_for_is_not_ours() {
     // With two modules on a broker, this is the other module's answer.
     let mut m = module();
-    let out = m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    let out = m.message(topic::SCAN_RESPONSE, &yes(), 100);
     assert!(publishes_to(&out).is_empty());
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(!m.tool_is_on());
@@ -330,8 +330,8 @@ fn a_lease_naming_the_tool_by_uuid_is_still_ours() {
     // Leases are matched on device_id, so either works.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
-    let uuid_lease = json!({"tool_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "device_id": ME,
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
+    let uuid_lease = json!({"resource": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "device_id": ME,
                "grant": true, "ttl_ms": 3000});
     m.message(topic::LEASE, uuid_lease.to_string().as_bytes(), 200);
     assert!(m.tool_is_on());
@@ -356,7 +356,7 @@ fn a_lease_that_does_not_parse_grants_nothing() {
 fn a_zero_ttl_is_an_immediate_expiry() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 0), 200);
     assert!(!m.tool_is_on());
 }
@@ -377,9 +377,9 @@ fn a_lapse_reports_and_releases_like_a_stop() {
     let out = m.tick(3200);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST]
     );
-    assert_eq!(published(&out, topic::TOOL_OFF_REQUEST)[0]["card"], ALICE);
+    assert_eq!(published(&out, topic::STOP_REQUEST)[0]["card"], ALICE);
 }
 
 // ---------------------------------------------- rule 5: every stop is clean
@@ -407,7 +407,7 @@ fn tool_off_switches_off_then_reports_then_releases() {
     );
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST]
     );
 }
 
@@ -416,8 +416,8 @@ fn the_session_is_closed_with_the_card_that_opened_it() {
     let mut m = alice_running_tool();
     m.swipe(BOB, 500); // ignored: in use
     let out = m.tool_off(1000);
-    assert_eq!(published(&out, topic::TOOL_LOG_REQUEST)[0]["card"], ALICE);
-    assert_eq!(published(&out, topic::TOOL_OFF_REQUEST)[0]["card"], ALICE);
+    assert_eq!(published(&out, topic::USAGE_REQUEST)[0]["card"], ALICE);
+    assert_eq!(published(&out, topic::STOP_REQUEST)[0]["card"], ALICE);
 }
 
 #[test]
@@ -438,9 +438,22 @@ fn a_second_swipe_while_waiting_sends_nothing() {
 }
 
 #[test]
-fn tool_off_with_no_session_sends_nothing() {
+fn tool_off_with_no_session_still_releases_the_resource_without_a_card() {
+    // A stop is a safety act (CS:S #179, #182): whatever device the button is
+    // on, and whether or not this device holds a session, the stop goes out
+    // naming the resource alone, and the edge and the server end whatever
+    // session is open on it -- a door box's stop button is how the room it
+    // opened is closed. A stop that lands on nothing is harmless. Until 0.4 a
+    // reader with no session of its own sent nothing.
     let mut m = module();
-    assert!(publishes_to(&m.tool_off(0)).is_empty());
+    let out = m.tool_off(0);
+    assert_eq!(publishes_to(&out), vec![topic::STOP_REQUEST]);
+    let stop = &published(&out, topic::STOP_REQUEST)[0];
+    assert_eq!(stop["resource"], TOOL);
+    assert!(
+        stop.get("card").is_none(),
+        "named a card it does not have: {stop}"
+    );
 }
 
 #[test]
@@ -448,7 +461,7 @@ fn after_a_session_ends_the_next_person_can_swipe() {
     let mut m = alice_running_tool();
     m.tool_off(1000);
     let out = m.swipe(BOB, 1100);
-    assert_eq!(published(&out, topic::TOOL_ON_REQUEST)[0]["card"], BOB);
+    assert_eq!(published(&out, topic::SCAN_REQUEST)[0]["card"], BOB);
 }
 
 // ------------------------------------------------- rule 6: the heartbeat
@@ -468,13 +481,13 @@ fn the_power_report_tells_the_truth_about_the_relay_and_the_draw() {
     let r = &published(&m.tick(1000), topic::POWER_REPORT)[0];
     assert_eq!(
         (r["relay_on"].clone(), r["draw_now"].clone()),
-        (json!(true), json!("0.3"))
+        (json!(true), json!(0.3))
     );
     m.running(true, 1100);
     let r = &published(&m.tick(2000), topic::POWER_REPORT)[0];
-    assert_eq!(r["draw_now"], "4.2");
+    assert_eq!(r["draw_now"], 4.2);
     assert_eq!(r["device_id"], ME);
-    assert_eq!(r["tool_id"], TOOL);
+    assert_eq!(r["resource"], TOOL);
 }
 
 #[test]
@@ -482,7 +495,7 @@ fn acknowledgements_change_nothing() {
     // An ack is not approval to stay on.
     let mut m = alice_running_tool();
     m.message(topic::POWER_RESPONSE, br#"{"ok":true}"#, 3000);
-    m.message(topic::TOOL_OFF_RESPONSE, br#"{"ok":true}"#, 3000);
+    m.message(topic::STOP_RESPONSE, br#"{"ok":true}"#, 3000);
     m.tick(3200);
     assert!(!m.tool_is_on());
 }
@@ -519,7 +532,7 @@ fn only_running_time_is_reported_as_usage() {
     m.running(false, 4000); // 1.0 s
     let out = m.tool_off(5000);
     assert_eq!(
-        published(&out, topic::TOOL_LOG_REQUEST)[0]["seconds"],
+        published(&out, topic::USAGE_REQUEST)[0]["seconds"],
         json!(2.5)
     );
 }
@@ -530,7 +543,7 @@ fn a_run_still_going_at_tool_off_is_counted() {
     m.running(true, 1000);
     let out = m.tool_off(2000);
     assert_eq!(
-        published(&out, topic::TOOL_LOG_REQUEST)[0]["seconds"],
+        published(&out, topic::USAGE_REQUEST)[0]["seconds"],
         json!(1.0)
     );
 }
@@ -542,7 +555,7 @@ fn the_count_stops_the_moment_the_lease_lapses() {
     let out = m.tick(9000); // noticed late; the cut was at 3200
     assert!(!m.running_is_on());
     assert_eq!(
-        published(&out, topic::TOOL_LOG_REQUEST)[0]["seconds"],
+        published(&out, topic::USAGE_REQUEST)[0]["seconds"],
         json!(2.0),
         "usage ends at the lease's end, not when the expiry was noticed"
     );
@@ -587,7 +600,7 @@ fn running_goes_off_before_the_tool_and_on_after_it() {
 
 /// A yes that names a tool explicitly.
 fn yes_for(tool: &str) -> Vec<u8> {
-    json!({"tool_id": tool, "authorized": true, "reason": "authorized"})
+    json!({"resource": tool, "authorized": true, "reason": "authorized"})
         .to_string()
         .into_bytes()
 }
@@ -597,7 +610,7 @@ fn a_yes_for_another_tool_does_not_start_a_session_here() {
     let mut m = module();
     m.swipe(ALICE, 0);
 
-    m.message(topic::TOOL_ON_RESPONSE, &yes_for("drill-07"), 100);
+    m.message(topic::SCAN_RESPONSE, &yes_for("drill-07"), 100);
 
     // THE LEASE IS WHAT MAKES THIS ARM DISCRIMINATE, and leaving it out made the
     // test a tautology -- caught by disabling the filter and watching it still
@@ -628,9 +641,9 @@ fn and_our_own_answer_still_arrives_afterwards() {
     // swipe denies our member.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes_for("drill-07"), 100);
+    m.message(topic::SCAN_RESPONSE, &yes_for("drill-07"), 100);
 
-    m.message(topic::TOOL_ON_RESPONSE, &yes_for(TOOL), 200);
+    m.message(topic::SCAN_RESPONSE, &yes_for(TOOL), 200);
     m.message(topic::LEASE, &lease(ME, true, 3000), 300);
 
     assert!(
@@ -644,7 +657,7 @@ fn and_our_own_answer_still_arrives_afterwards() {
 fn a_yes_naming_our_tool_is_accepted() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes_for(TOOL), 100);
+    m.message(topic::SCAN_RESPONSE, &yes_for(TOOL), 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(
         m.tool_is_on(),
@@ -660,7 +673,7 @@ fn a_yes_naming_no_tool_is_still_accepted() {
     // is a deliberate hole, not an oversight: see ToolOnReply::is_for.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
     assert!(
         m.tool_is_on(),
@@ -693,14 +706,14 @@ fn sensing(assert_ms: u32, hold_ms: u32, interval_ms: u64) -> Module {
 /// never what ends these tests.
 fn alice_on(mut m: Module) -> Module {
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 600_000), 200);
     assert!(m.tool_is_on(), "setup: the tool should be on");
     m
 }
 
 fn logs(actions: &[Action]) -> Vec<Value> {
-    published(actions, topic::TOOL_LOG_REQUEST)
+    published(actions, topic::USAGE_REQUEST)
 }
 
 #[test]
@@ -897,7 +910,7 @@ fn a_session_that_reported_everything_already_does_not_add_a_zero() {
     );
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_OFF_REQUEST],
+        vec![topic::STOP_REQUEST],
         "the tool must still be released"
     );
 }
@@ -911,7 +924,7 @@ fn a_session_that_never_ran_still_reports_once() {
     let out = m.tool_off(500);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST]
     );
     assert_eq!(logs(&out)[0]["seconds"], json!(0.0));
 }
@@ -961,7 +974,7 @@ fn no_power() -> Module {
 /// Alice is authorized at t=100. No lease, because none is ever coming.
 fn alice_reading(mut m: Module) -> Module {
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m
 }
 
@@ -986,11 +999,11 @@ fn a_power_module_still_gives_up_when_no_lease_arrives() {
     // cannot guarantee the tool is safe.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     let out = m.tick(100 + 5_000);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST]
     );
 }
 
@@ -1052,7 +1065,7 @@ fn usage_accrues_without_a_lease_when_there_is_nothing_to_energize() {
     m.running(true, 1_000);
     m.running(false, 3_000);
     let out = m.swipe(ALICE, 4_000); // second tap ends it
-    let log = &published(&out, topic::TOOL_LOG_REQUEST)[0];
+    let log = &published(&out, topic::USAGE_REQUEST)[0];
     assert_eq!(log["seconds"], json!(2.0));
     assert_eq!(log["active_seconds"], json!(2.0));
 }
@@ -1068,11 +1081,11 @@ fn the_same_card_again_ends_the_session() {
     let out = m.swipe(ALICE, 5_000);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST],
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST],
         "a second tap did not release the tool"
     );
     assert_eq!(
-        published(&out, topic::TOOL_OFF_REQUEST)[0]["card"],
+        published(&out, topic::STOP_REQUEST)[0]["card"],
         ALICE,
         "released with the wrong card"
     );
@@ -1121,11 +1134,11 @@ fn a_machine_left_idle_ends_the_session() {
     let out = m.tick(12_000);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST],
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST],
         "the idle timeout never fired"
     );
     assert_eq!(
-        published(&out, topic::TOOL_LOG_REQUEST)[0]["seconds"],
+        published(&out, topic::USAGE_REQUEST)[0]["seconds"],
         json!(1.0),
         "the idle time was billed as usage"
     );
@@ -1162,7 +1175,7 @@ fn the_maximum_session_is_a_backstop_whatever_else_is_true() {
     let out = m.tick(30_100);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST, topic::TOOL_OFF_REQUEST]
+        vec![topic::USAGE_REQUEST, topic::STOP_REQUEST]
     );
 }
 
@@ -1283,7 +1296,7 @@ fn outcomes(actions: &[Action]) -> Vec<Outcome> {
 fn a_yes_tells_the_panel_the_member_is_authorized() {
     let mut m = module();
     m.swipe(ALICE, 0);
-    let out = m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    let out = m.message(topic::SCAN_RESPONSE, &yes(), 100);
     assert_eq!(outcomes(&out), vec![Outcome::Authorized]);
 }
 
@@ -1292,7 +1305,7 @@ fn a_refusal_carries_the_edges_own_words_to_the_panel() {
     let mut m = module();
     m.swipe(BOB, 0);
     let out = m.message(
-        topic::TOOL_ON_RESPONSE,
+        topic::SCAN_RESPONSE,
         br#"{"authorized":false,"reason":"Training required"}"#,
         100,
     );
@@ -1310,7 +1323,7 @@ fn an_unreadable_answer_is_a_refusal_and_not_a_silence() {
     // to their training record, a silence to the network.
     let mut m = module();
     m.swipe(ALICE, 0);
-    let out = m.message(topic::TOOL_ON_RESPONSE, b"yes please", 100);
+    let out = m.message(topic::SCAN_RESPONSE, b"yes please", 100);
     assert_eq!(
         outcomes(&out),
         vec![Outcome::Refused("unreadable answer".to_string())]
@@ -1363,7 +1376,7 @@ fn activity_distinguishes_resting_asking_and_in_session() {
     assert_eq!(m.activity(), Activity::Idle);
     m.swipe(ALICE, 0);
     assert_eq!(m.activity(), Activity::Asking);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     assert_eq!(
         m.activity(),
         Activity::Session { energized: false },
@@ -1411,7 +1424,7 @@ fn a_plug_meters_the_time_it_is_energized_and_reports_it_with_no_card() {
     assert!(!m.tool_is_on());
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_LOG_REQUEST],
+        vec![topic::USAGE_REQUEST],
         "a plug reports usage and nothing else -- it has no card to release with"
     );
     let log = &logs(&out)[0];
@@ -1419,7 +1432,7 @@ fn a_plug_meters_the_time_it_is_energized_and_reports_it_with_no_card() {
         log.get("card").is_none(),
         "a plug named a card it cannot know: {log}"
     );
-    assert_eq!(log["tool_id"], TOOL);
+    assert_eq!(log["resource"], TOOL);
     assert_eq!(log["seconds"], json!(5.0));
     assert!(
         log.get("active_seconds").is_none(),
@@ -1501,13 +1514,13 @@ fn a_plugs_stop_releases_the_tool_without_a_card() {
     let mut m = plug();
     m.message(topic::LEASE, &lease(ME, true, 60_000), 100);
     let out = m.tool_off(1_000);
-    assert_eq!(publishes_to(&out), vec![topic::TOOL_OFF_REQUEST], "{out:?}");
-    let req = &published(&out, topic::TOOL_OFF_REQUEST)[0];
+    assert_eq!(publishes_to(&out), vec![topic::STOP_REQUEST], "{out:?}");
+    let req = &published(&out, topic::STOP_REQUEST)[0];
     assert!(
         req.get("card").is_none(),
         "a plug named a card it cannot know: {req}"
     );
-    assert_eq!(req["tool_id"], TOOL);
+    assert_eq!(req["resource"], TOOL);
     assert!(
         m.tool_is_on(),
         "a plug must not cut itself on a stop; the lease decides"
@@ -1540,7 +1553,7 @@ fn a_device_configured_not_to_report_usage_still_stops_cleanly_and_sends_no_log(
     let mut m = Module::new(c);
     m.start(0);
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 60_000), 200);
     m.running(true, 1_000);
     let mut periodic: Vec<Value> = Vec::new();
@@ -1554,7 +1567,7 @@ fn a_device_configured_not_to_report_usage_still_stops_cleanly_and_sends_no_log(
     let out = m.tool_off(5_000);
     assert_eq!(
         publishes_to(&out),
-        vec![topic::TOOL_OFF_REQUEST],
+        vec![topic::STOP_REQUEST],
         "the stop must still release the tool, and only that: {out:?}"
     );
     assert!(!m.tool_is_on(), "the relay stayed closed");
@@ -1615,7 +1628,7 @@ fn only_a_device_that_senses_the_machine_offers_a_usage_figure() {
     assert_eq!(m.usage(0), None);
     m.swipe(ALICE, 0);
     assert_eq!(m.usage(50), None, "a figure before the yes");
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     assert_eq!(
         m.usage(100),
         Some(Usage {
@@ -1631,7 +1644,7 @@ fn the_usage_figure_is_the_held_one_and_follows_the_bridged_signal() {
     // on the panel exactly as in the figure that bills.
     let mut m = sensing(0, 2_000, 0);
     m.swipe(ALICE, 0);
-    m.message(topic::TOOL_ON_RESPONSE, &yes(), 100);
+    m.message(topic::SCAN_RESPONSE, &yes(), 100);
     m.message(topic::LEASE, &lease(ME, true, 60_000), 200);
 
     m.running(true, 1_000);
@@ -1741,4 +1754,188 @@ fn a_device_that_switches_nothing_still_sends_a_power_report_alongside() {
     let out = m.start(0);
     assert_eq!(published(&out, topic::POWER_REPORT).len(), 1);
     assert_eq!(pulses(&out).len(), 1);
+}
+
+// ------------------------------------------------------- a latch (CS:S #182)
+//
+// A door, a tool and a room are the same resource with different bindings. A
+// device bound in the `strike` role drives a latch: on a yes whose reply
+// carries `strike.pulse_ms`, it releases the latch for exactly that long. The
+// pulse is the edge's to name -- it is the resource's strike binding's
+// profile -- and the latch is never leased and never held for a session.
+
+fn door_box() -> Module {
+    let mut m = Module::new(Config::drives_a_latch(ME, "front-door"));
+    m.start(0);
+    m
+}
+
+fn yes_with_strike(pulse_ms: i64) -> Vec<u8> {
+    json!({"resource": "front-door", "authorized": true, "reason": "authorized",
+           "strike": {"pulse_ms": pulse_ms}})
+    .to_string()
+    .into_bytes()
+}
+
+fn sets(actions: &[Action], output: Output) -> Vec<bool> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Set { output: o, on } if *o == output => Some(*on),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_wire_is_resource_shaped() {
+    // The topics and the field a request names the resource by, pinned as
+    // literals: this crate copies the wire rather than depending on css_lib,
+    // so nothing but this test holds it to FIRMWARE.md's local-broker tables.
+    assert_eq!(topic::SCAN_REQUEST, "resource/request/scan");
+    assert_eq!(topic::STOP_REQUEST, "resource/request/stop");
+    assert_eq!(topic::USAGE_REQUEST, "resource/request/usage");
+    assert_eq!(topic::POWER_REPORT, "resource/request/power");
+    assert_eq!(topic::ALIVE_REQUEST, "resource/request/alive");
+    assert_eq!(topic::SCAN_RESPONSE, "resource/response/scan");
+    assert_eq!(topic::LEASE, "resource/lease");
+    let mut m = module();
+    let scan = &published(&m.swipe(ALICE, 0), topic::SCAN_REQUEST)[0];
+    assert_eq!(scan["resource"], TOOL);
+    assert!(
+        scan.get("tool_id").is_none(),
+        "spoke the alias's name: {scan}"
+    );
+    let report = &published(&m.tick(1000), topic::POWER_REPORT)[0];
+    assert_eq!(report["resource"], TOOL);
+    assert!(
+        report["draw_now"].is_number(),
+        "draw is a number on this wire: {report}"
+    );
+}
+
+#[test]
+fn a_yes_with_a_strike_releases_the_latch_for_exactly_the_pulse() {
+    let mut m = door_box();
+    let start = m.start(0);
+    assert_eq!(
+        sets(&start, Output::Strike),
+        vec![false],
+        "known-off at boot"
+    );
+    assert!(
+        sets(&start, Output::Tool).is_empty(),
+        "a door box has no relay"
+    );
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::SCAN_RESPONSE, &yes_with_strike(4200), 100);
+    assert_eq!(sets(&out, Output::Strike), vec![true]);
+    assert!(m.strike_is_on());
+    assert!(out.contains(&Action::Outcome(Outcome::Authorized)));
+    assert_eq!(m.activity(), Activity::Session { energized: false });
+    // Still released just inside the pulse, closed again at its end -- and
+    // the session was the pulse: over, with nothing sent for it.
+    assert!(sets(&m.tick(4299), Output::Strike).is_empty());
+    assert!(m.strike_is_on());
+    let end = m.tick(4300);
+    assert_eq!(sets(&end, Output::Strike), vec![false]);
+    assert!(!m.strike_is_on());
+    assert!(end.contains(&Action::Outcome(Outcome::Ended(EndReason::StrikePulsed))));
+    assert!(
+        publishes_to(&end).is_empty(),
+        "a pulse ending is not a stop and not usage: {end:?}"
+    );
+    assert_eq!(m.activity(), Activity::Idle);
+    // And the next badge is asked about at once.
+    let next = m.swipe(BOB, 4400);
+    assert_eq!(published(&next, topic::SCAN_REQUEST)[0]["card"], BOB);
+}
+
+#[test]
+fn a_yes_that_names_no_pulse_releases_nothing_on_a_door_box() {
+    // The pulse is the resource's strike binding's; a device told none has
+    // nothing to guess a duration from, and says so instead.
+    let mut m = door_box();
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::SCAN_RESPONSE, &yes(), 100);
+    assert!(sets(&out, Output::Strike).is_empty());
+    assert!(!m.strike_is_on());
+    assert!(out
+        .iter()
+        .any(|a| matches!(a, Action::Note(n) if n.contains("no pulse"))));
+    // The session was the pulse, and there was none: over at once.
+    let end = m.tick(150);
+    assert!(end.contains(&Action::Outcome(Outcome::Ended(EndReason::StrikePulsed))));
+    assert_eq!(m.activity(), Activity::Idle);
+}
+
+#[test]
+fn a_zero_or_negative_pulse_is_no_pulse() {
+    let mut m = door_box();
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::SCAN_RESPONSE, &yes_with_strike(0), 100);
+    assert!(sets(&out, Output::Strike).is_empty());
+    let mut m = door_box();
+    m.swipe(ALICE, 0);
+    let out = m.message(topic::SCAN_RESPONSE, &yes_with_strike(-5), 100);
+    assert!(sets(&out, Output::Strike).is_empty());
+}
+
+#[test]
+fn a_no_never_releases_the_latch_whatever_it_carries() {
+    let mut m = door_box();
+    m.swipe(ALICE, 0);
+    let no = json!({"resource": "front-door", "authorized": false, "reason": "Card not authorized",
+                    "strike": {"pulse_ms": 4200}})
+    .to_string()
+    .into_bytes();
+    let out = m.message(topic::SCAN_RESPONSE, &no, 100);
+    assert!(sets(&out, Output::Strike).is_empty());
+    assert!(!m.strike_is_on());
+    assert!(out.contains(&Action::Outcome(Outcome::Refused(
+        "Card not authorized".into()
+    ))));
+}
+
+#[test]
+fn a_device_that_drives_no_latch_ignores_the_strike() {
+    // A reader beside a tool that happens to have a strike binding elsewhere
+    // gets the pulse in its reply too; with no latch of its own it has nothing
+    // to release, and its session follows the tool's rules as before.
+    let mut m = module();
+    m.swipe(ALICE, 0);
+    let yes = json!({"resource": TOOL, "authorized": true, "strike": {"pulse_ms": 4200}})
+        .to_string()
+        .into_bytes();
+    let out = m.message(topic::SCAN_RESPONSE, &yes, 100);
+    assert!(sets(&out, Output::Strike).is_empty());
+    assert!(!m.strike_is_on());
+    assert_eq!(m.activity(), Activity::Session { energized: false });
+}
+
+#[test]
+fn a_room_in_one_box_pulses_the_latch_and_keeps_the_tools_session_rules() {
+    // Reads cards, gates power AND drives a latch: the latch pulses on the
+    // yes, the relay waits for its lease, and the session is the tool's --
+    // it ends on the lease and the stop, not on the pulse.
+    let mut c = Config::new(ME, "wood-shop");
+    c.drives_latch = true;
+    let mut m = Module::new(c);
+    m.start(0);
+    m.swipe(ALICE, 0);
+    let yes = json!({"resource": "wood-shop", "authorized": true, "strike": {"pulse_ms": 1000}})
+        .to_string()
+        .into_bytes();
+    let out = m.message(topic::SCAN_RESPONSE, &yes, 100);
+    assert_eq!(sets(&out, Output::Strike), vec![true]);
+    assert!(!m.tool_is_on(), "the relay waits for its lease");
+    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+    assert!(m.tool_is_on());
+    let later = m.tick(1100);
+    assert_eq!(sets(&later, Output::Strike), vec![false], "the pulse ended");
+    assert!(m.tool_is_on(), "the session did not end with the pulse");
+    assert_eq!(m.activity(), Activity::Session { energized: true });
+    let stop = m.tool_off(2000);
+    assert!(stop.contains(&Action::Outcome(Outcome::Ended(EndReason::ToolOff))));
+    assert_eq!(published(&stop, topic::STOP_REQUEST)[0]["card"], ALICE);
 }

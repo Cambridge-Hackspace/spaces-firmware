@@ -201,6 +201,10 @@ impl Outputs for Leds {
         let pin = match output {
             spaces_device::Output::Tool => &mut self.tool,
             spaces_device::Output::Running => &mut self.running,
+            // The demo board has no latch (CS:S #182); a device that declares
+            // no `strike` role is never asked to drive one, so this arm is
+            // the exhaustive match's honesty rather than a feature.
+            spaces_device::Output::Strike => return,
         };
         let _ = if on { pin.set_high() } else { pin.set_low() };
     }

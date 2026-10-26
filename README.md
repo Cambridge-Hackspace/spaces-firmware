@@ -13,7 +13,20 @@ It is two things at once:
   people swiping cards and LEDs standing in for a machine, built as a starting
   point for writing a new module.
 
-The protocol itself is described in the platform's `FIRMWARE.md`.
+The protocol itself is described in the platform's `FIRMWARE.md`. Since 0.4 a
+module speaks the **resource-shaped** local wire (CS:S #182): a door, a tool
+and a room are the same thing on the broker -- a *resource* a badge is
+presented to -- so every request names the `resource` on
+`resource/request/scan`, `resource/request/stop`, `resource/request/usage`,
+`resource/request/power` and `resource/request/alive`, and reads
+`resource/response/scan` and `resource/lease`. The `toolguard/*` topics this
+firmware spoke until 0.3 are the edge's deprecated aliases for these.
+
+What a device *is* -- a badge reader, a plug, a sensor, a door's latch, or any
+combination -- is `Config`, not a build: `gates_power` drives a relay off a
+lease, `drives_latch` releases a latch for exactly the pulse the edge names in
+its yes (`Output::Strike`, for a device bound in the **`strike`** role), and a
+device may do both.
 
 > Work in progress. The demo runs the protocol end to end against a stand-in
 > edge, and takes firmware updates over the network; a real edge is next. What
@@ -199,8 +212,8 @@ Keep the module's log open, at `http://<the module>/log` or over USB with
    firmware, and keeps it once it is back on the broker. *An update that cannot
    get back to the broker is undone by itself, three minutes later.*
 
-Several modules on one broker, as of CS:S #166: the edge echoes `tool_id` in a
-`tool-on` reply and a module drops an answer about another tool before reading
+Several modules on one broker, as of CS:S #166: the edge echoes the `resource`
+in a scan reply and a module drops an answer about another resource before reading
 its verdict. **Against an edge without #166 it is still one module per broker** —
 such an edge names no tool, and all a module has then is the five-second
 single-outstanding-request window, which narrows the race without closing it.

@@ -3,7 +3,7 @@
 bench.
 
 It speaks the local-broker side of the protocol the way the reference edge
-does: it answers tool-on requests with {"authorized", "reason"}, acknowledges
+does: it answers scan requests with {"authorized", "reason", "resource"}, acknowledges
 tool-off, tool-log and power reports with {"ok": true}, and while a session is
 open it leases the module bound to that tool every second for three seconds.
 Like the real edge, it only leases a module it has heard a power report from in
@@ -47,15 +47,20 @@ import time
 
 import paho.mqtt.client as mqtt
 
-TOOL_ON_REQUEST = "toolguard/request/tool-on"
-TOOL_OFF_REQUEST = "toolguard/request/tool-off"
-TOOL_LOG_REQUEST = "toolguard/request/tool-log"
-POWER_REPORT = "toolguard/request/power"
-TOOL_ON_RESPONSE = "toolguard/response/tool-on"
-TOOL_OFF_RESPONSE = "toolguard/response/tool-off"
-TOOL_LOG_RESPONSE = "toolguard/response/tool-log"
-POWER_RESPONSE = "toolguard/response/power"
-LEASE = "toolguard/lease"
+# The resource-shaped local wire (CS:S #182): a door, a tool and a room are
+# one kind of thing, a resource a badge is presented to, and every payload
+# names it as `resource`. The `toolguard/*` names this file spoke until 0.4 are
+# the real edge's deprecated aliases for these.
+SCAN_REQUEST = "resource/request/scan"
+STOP_REQUEST = "resource/request/stop"
+USAGE_REQUEST = "resource/request/usage"
+POWER_REPORT = "resource/request/power"
+ALIVE_REQUEST = "resource/request/alive"
+SCAN_RESPONSE = "resource/response/scan"
+STOP_RESPONSE = "resource/response/stop"
+USAGE_RESPONSE = "resource/response/usage"
+POWER_RESPONSE = "resource/response/power"
+LEASE = "resource/lease"
 
 
 def log(direction, text):
@@ -64,7 +69,8 @@ def log(direction, text):
 
 
 class FakeEdge:
-    def __init__(self, client, allow, ttl_ms, interval_ms, offline_ms, tool_uuid):
+    def __init__(self, client, allow, ttl_ms, interval_ms, offline_ms, tool_uuid,
+                 strike_ms=0):
         self.client = client
         self.allow = set(allow)
         self.ttl_ms = ttl_ms
@@ -72,6 +78,7 @@ class FakeEdge:
         self.offline_ms = offline_ms
         # The real edge sends the tool's UUID in a lease, not its external id.
         self.tool_uuid = tool_uuid
+        self.strike_ms = strike_ms
         self.lock = threading.Lock()
         # tool_id -> card, for the open session on each tool
         self.sessions = {}
@@ -88,15 +95,23 @@ class FakeEdge:
         self.client.publish(topic, body)
         log(">>", f"{topic} {body}")
 
-    def yes(self):
+    def yes(self, resource):
         if self.reply_format == "doc":
-            return {"status": "ok", "tool_on": True}
-        return {"authorized": True, "reason": "authorized"}
+            reply = {"status": "ok", "tool_on": True, "resource": resource}
+        else:
+            reply = {"authorized": True, "reason": "authorized", "resource": resource}
+        # A resource with a latch gets its pulse on a yes (CS:S #182); the real
+        # edge takes it from the resource's strike binding, this one from
+        # --strike-ms. A device that drives no latch ignores it.
+        if self.strike_ms > 0:
+            reply["strike"] = {"pulse_ms": self.strike_ms}
+        return reply
 
-    def no(self, reason):
+    def no(self, reason, resource):
         if self.reply_format == "doc":
-            return {"status": "error", "message": reason, "tool_on": False}
-        return {"authorized": False, "reason": reason}
+            return {"status": "error", "message": reason, "tool_on": False,
+                    "resource": resource}
+        return {"authorized": False, "reason": reason, "resource": resource}
 
     # -- incoming ---------------------------------------------------------
 
@@ -108,44 +123,51 @@ class FakeEdge:
             log("!!", "that did not parse; ignored")
             return
         with self.lock:
-            if topic == TOOL_ON_REQUEST:
-                self.tool_on(msg)
-            elif topic == TOOL_OFF_REQUEST:
-                self.sessions.pop(msg.get("tool_id"), None)
-                self.publish(TOOL_OFF_RESPONSE, {"ok": True})
-            elif topic == TOOL_LOG_REQUEST:
-                self.publish(TOOL_LOG_RESPONSE, {"ok": True})
+            if topic == SCAN_REQUEST:
+                self.scan(msg)
+            elif topic == STOP_REQUEST:
+                self.sessions.pop(msg.get("resource"), None)
+                self.publish(STOP_RESPONSE, {"ok": True})
+            elif topic == USAGE_REQUEST:
+                self.publish(USAGE_RESPONSE, {"ok": True})
             elif topic == POWER_REPORT:
                 device = msg.get("device_id")
                 if device:
-                    self.modules[device] = (msg.get("tool_id"), time.monotonic())
+                    self.modules[device] = (msg.get("resource"), time.monotonic())
                 self.publish(POWER_RESPONSE, {"ok": True})
+            elif topic == ALIVE_REQUEST:
+                # Liveness for a device that reports no power (CS:S #170): it
+                # keeps whatever resource it last reported on, or none.
+                device = msg.get("device_id")
+                if device:
+                    resource = self.modules.get(device, (None, 0))[0]
+                    self.modules[device] = (resource, time.monotonic())
 
-    def tool_on(self, msg):
-        card, tool = msg.get("card"), msg.get("tool_id")
+    def scan(self, msg):
+        card, resource = msg.get("card"), msg.get("resource")
         override, self.next_reply = self.next_reply, None
         if override == "ignore":
             log("..", f"not answering the request for {card}, as asked")
             return
         if override == "ok":
-            self.publish(TOOL_ON_RESPONSE, {"status": "ok"})
+            self.publish(SCAN_RESPONSE, {"status": "ok", "resource": resource})
             return
         if override == "late":
             log("..", f"will answer {card} with a yes in 8 s")
-            threading.Timer(8.0, self.late_yes, args=(card, tool)).start()
+            threading.Timer(8.0, self.late_yes, args=(card, resource)).start()
             return
-        if tool in self.sessions:
-            self.publish(TOOL_ON_RESPONSE, self.no("Tool is already in use"))
+        if resource in self.sessions:
+            self.publish(SCAN_RESPONSE, self.no("Tool is already in use", resource))
         elif card not in self.allow:
-            self.publish(TOOL_ON_RESPONSE, self.no("Unknown card"))
+            self.publish(SCAN_RESPONSE, self.no("Unknown card", resource))
         else:
-            self.sessions[tool] = card
-            self.publish(TOOL_ON_RESPONSE, self.yes())
+            self.sessions[resource] = card
+            self.publish(SCAN_RESPONSE, self.yes(resource))
 
-    def late_yes(self, card, tool):
+    def late_yes(self, card, resource):
         with self.lock:
-            self.sessions[tool] = card
-            self.publish(TOOL_ON_RESPONSE, self.yes())
+            self.sessions[resource] = card
+            self.publish(SCAN_RESPONSE, self.yes(resource))
 
     # -- the lease loop ---------------------------------------------------
 
@@ -163,7 +185,7 @@ class FakeEdge:
                         # A module the edge has not heard from is not leased.
                         continue
                     self.publish(LEASE, {
-                        "tool_id": self.tool_uuid,
+                        "resource": self.tool_uuid,
                         "device_id": device,
                         "grant": True,
                         "ttl_ms": self.ttl_ms,
@@ -184,7 +206,7 @@ class FakeEdge:
                 for device, (tool, _) in self.modules.items():
                     if tool in self.sessions:
                         self.publish(LEASE, {
-                            "tool_id": self.tool_uuid, "device_id": device,
+                            "resource": self.tool_uuid, "device_id": device,
                             "grant": False, "ttl_ms": self.ttl_ms, "reason": "revoked",
                         })
                         self.sessions.pop(tool, None)
@@ -213,6 +235,9 @@ def main():
     parser.add_argument("--interval-ms", type=int, default=1000)
     parser.add_argument("--offline-ms", type=int, default=5000)
     parser.add_argument("--tool-uuid", default="7c9e6679-7425-40de-944b-e07fc1f90ae7")
+    parser.add_argument("--strike-ms", type=int, default=0,
+                        help="answer a yes with a latch pulse of this many ms, as the "
+                             "real edge does for a resource with a strike binding")
     parser.add_argument("--username")
     parser.add_argument("--password-file",
                         help="a file whose first line is the broker password")
@@ -226,14 +251,15 @@ def main():
                 password = f.readline().rstrip("\n")
         client.username_pw_set(args.username, password)
     edge = FakeEdge(client, args.allow, args.ttl_ms, args.interval_ms,
-                    args.offline_ms, args.tool_uuid)
+                    args.offline_ms, args.tool_uuid, args.strike_ms)
 
     def on_connect(client, _userdata, _flags, reason, _props):
         log("..", f"connected to {args.broker}:{args.port} ({reason})")
         if reason.is_failure:
             return
         # Subscribe on every connect: a clean session forgets subscriptions.
-        for topic in (TOOL_ON_REQUEST, TOOL_OFF_REQUEST, TOOL_LOG_REQUEST, POWER_REPORT):
+        for topic in (SCAN_REQUEST, STOP_REQUEST, USAGE_REQUEST, POWER_REPORT,
+                      ALIVE_REQUEST):
             client.subscribe(topic)
 
     client.on_connect = on_connect
