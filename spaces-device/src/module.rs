@@ -266,12 +266,17 @@ pub struct Config {
     /// chain it has already satisfied. That is #83's coordinator model: reader
     /// auth, edge decides, plug obeys.
     ///
-    /// A plug publishes no `tool-on`, `tool-off` or `tool-log`, and **cannot**,
-    /// even with a sensor wired in: every one of those names a card, and
-    /// nothing the edge sends a power module carries one -- `toolguard/lease`
-    /// has `tool_id`, `device_id`, `grant`, `ttl_ms` and `reason`, and no card.
-    /// So usage on such a tool is the reader's to report. A plug's sensor is
-    /// still worth having for the Running indicator and the draw figure.
+    /// A plug publishes no `tool-on` and no `tool-off`: both name a card, and
+    /// nothing the edge sends a power module carries one -- the lease has
+    /// `resource`, `device_id`, `grant`, `ttl_ms` and `reason`, and no card.
+    /// It does report usage, with no card (CS:S #174): its standing meter
+    /// opens on a lease and closes when the lease lapses, and the server puts
+    /// what it reports on whoever is signed on to the resource. The same
+    /// holds for a device that only senses: it is leased so that it knows
+    /// there is a session to meter, and reports the machine working the same
+    /// card-less way. (This comment used to say a plug "cannot" report usage;
+    /// that was true before #174 and is the opposite of what the code below
+    /// does now.)
     pub reads_cards: bool,
 }
 
