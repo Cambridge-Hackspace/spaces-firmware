@@ -131,6 +131,12 @@ class FakeEdge:
             elif topic == USAGE_REQUEST:
                 self.publish(USAGE_RESPONSE, {"ok": True})
             elif topic == POWER_REPORT:
+                # The real edge reads draw_now as a float and drops a report
+                # where it is anything else, heartbeat and all. So does this.
+                draw = msg.get("draw_now")
+                if draw is not None and (isinstance(draw, bool) or not isinstance(draw, (int, float))):
+                    log("!!", "draw_now is not a number; report dropped, as the edge does")
+                    return
                 device = msg.get("device_id")
                 if device:
                     self.modules[device] = (msg.get("resource"), time.monotonic())

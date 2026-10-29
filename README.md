@@ -217,7 +217,7 @@ in a scan reply and a module drops an answer about another resource before readi
 its verdict. **Against an edge without #166 it is still one module per broker** —
 such an edge names no tool, and all a module has then is the five-second
 single-outstanding-request window, which narrows the race without closing it.
-See [docs/FINDINGS.md](docs/FINDINGS.md), finding 7.
+See [docs/FINDINGS.md](docs/FINDINGS.md), finding 8.
 
 ## License
 

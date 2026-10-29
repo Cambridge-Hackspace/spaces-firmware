@@ -26,8 +26,8 @@ short list of places it let a careful reader down.
 
 ## Wrong: following the document builds a broken module
 
-These were confirmed against the source. A module built faithfully from the
-document gets each of them wrong.
+These were confirmed against the source or against the running edge. A module
+built faithfully from the document gets each of them wrong.
 
 ### 1. The edge does not answer tool-on with the server's envelope
 
@@ -90,9 +90,31 @@ heartbeat, carries `device_id`, and reports `relay_on` truthfully.
   would let modules read the site's topics; the site broker's ACL rightly
   refuses the local ones.
 
+### 5. A power report's `draw_now` is a number on the local broker
+
+*`POST /api/toolguard/power-report`* says "Decimal fields are **strings**, not
+floats", with `"draw_now": "4.2"` in its example, and *The local broker* lists
+`toolguard/request/power` with the same fields and no word on their types. A
+module that reasonably carries the rule across sends `"draw_now": "0.0"`, and
+the reference edge (the published `:dev` image, 2026-10-14) rejects it:
+
+    WARN Failed to parse local power request: invalid type: string "0.0", expected f64
+
+It drops the whole report, and the power report is the module's heartbeat, so
+the module never counts as alive and is never leased. Nothing tells the
+module: the edge still answers nothing, and the tool simply never stays on.
+Found only on the first run against a real edge; the fake edge, written from
+the document, accepted the string.
+
+*What we did:* `draw_now` is a JSON number on the local broker. Tested in
+`spaces-device/tests/module.rs`, and the fake edge now drops a report with a
+string `draw_now`, as the real one does. `voltage_now` is untried: this module
+does not send it. The document should give the local topic's types, or the
+edge should accept both.
+
 ## Silent: what a module author has to guess
 
-### 5. Who runs the local broker
+### 6. Who runs the local broker
 
 The document says modules speak to "the local broker" and the edge is their
 counterparty, but not whether the edge *is* the broker or connects to one, so
@@ -100,7 +122,7 @@ an author cannot tell where to point a module. It connects to one: the edge
 expects a broker beside it (a mosquitto on the edge's own machine, here).
 *MQTT* should say so, with the address an edge uses by default.
 
-### 6. The local broker's security is the whole of it
+### 7. The local broker's security is the whole of it
 
 Nothing on the local wire is signed. `command_key` covers the site broker's
 commands only, and *The local broker* says its topics are "inside one
@@ -114,7 +136,7 @@ module's may publish only `toolguard/request/#` and read only
 `toolguard/response/#` and `toolguard/lease`. Checked: a module's login cannot
 forge a lease or a reply, nor read another module's requests.
 
-### 7. Replies carry nothing to say whose they are
+### 8. Replies carry nothing to say whose they are
 
 `toolguard/response/tool-on` names no card, tool, device or request. With more
 than one module on a broker, each sees every reply, and cannot tell its own
@@ -138,7 +160,7 @@ had always echoed `door_id`; the tool half simply never did.
 Related: `toolguard/request/tool-on` carries no `device_id` either, so the edge
 cannot tell which module asked, only which tool.
 
-### 8. What happens when a lease lapses mid-session
+### 9. What happens when a lease lapses mid-session
 
 The document is clear that silence means stop. It does not say whether the
 session is then over, or whether a renewal arriving later may bring the tool
@@ -149,7 +171,7 @@ exactly what latching exists to prevent.
 `tool-off` are sent with the card that started it, and a fresh swipe is
 needed. A later renewal is ignored. Tested.
 
-### 9. What `seconds` in `tool-log` counts
+### 10. What `seconds` in `tool-log` counts
 
 `seconds (float)`, and nothing else. For a metered tool it matters whether that
 is the session's length or the time the machine actually worked.
@@ -158,7 +180,7 @@ is the session's length or the time the machine actually worked.
 running switch, standing in for a beam firing), counted on a monotonic clock
 and stopped at the instant the outputs cut, not when the cut is noticed.
 
-### 10. Device invites are emoji
+### 11. Device invites are emoji
 
 *Registration* says `"device_code": "<invite code from an administrator>"`,
 and nothing more. They are eight emoji: 24 to 56 bytes, 8 to 16 codepoints,
@@ -171,7 +193,7 @@ character set, a password field that hides a bad paste.
 the form and the HTTP header, and a plain text field meant for pasting. Tested
 with a real emoji invite, byte for byte.
 
-### 11. A lost registration reply burns the invite
+### 12. A lost registration reply burns the invite
 
 The document rightly says to persist the token before anything else. But if
 the server accepts the invite and the reply is lost on the way back, the invite
@@ -179,7 +201,7 @@ is used and the device never learns its token; a retry is refused. No firmware
 can fix that. The server could, by answering a repeat of the same invite from
 the same MAC address with the same credentials.
 
-### 12. Class 2 has no lease source
+### 13. Class 2 has no lease source
 
 Leases come from an edge. A class 2 device has no edge, and the document does
 not say what keeps its relay safe if the server goes away mid-session. The
@@ -187,7 +209,7 @@ lifecycle diagram mixes the two classes ("renew the lease" beside a direct
 `POST /tool-on`). Not a problem for this module, which is class 1, but a trap
 for the next author.
 
-### 13. Whether the server ever sees a module
+### 14. Whether the server ever sees a module
 
 The server watches `last_seen`, updated by heartbeats on the site broker,
 which a module should not use. So a module's liveness reaches the edge (by its
@@ -196,20 +218,20 @@ edge forwards it, the document should say so.
 
 ## Inconsistent: small things
 
-14. **Two boot orders.** *Step 3* says `boot-reset` → `module-state` →
+15. **Two boot orders.** *Step 3* says `boot-reset` → `module-state` →
     `power-state`; the lifecycle diagram says `boot-reset` → `sync` →
     `power-state` → `module-state`. (Moot for a module after finding 2, but an
     edge author has to pick one.)
-15. **`tool_id` means two things.** An external id in requests and in the
+16. **`tool_id` means two things.** An external id in requests and in the
     lease example, a UUID in `module-state` and in real leases. The document
     says to match both, which every author then has to do everywhere; after
     finding 3, it is worth saying which payload carries which.
-16. **"Carry no `device_id`".** *The local broker* says its topics carry no
+17. **"Carry no `device_id`".** *The local broker* says its topics carry no
     `device_id`, and then lists it in `toolguard/request/power` and
     `toolguard/lease`, where it is essential.
-17. **A stale phrase.** `tool-off` "answers `status: "error"` … for … a bad
+18. **A stale phrase.** `tool-off` "answers `status: "error"` … for … a bad
     key", but keys were retired; the document's own checker covers literal
     denial strings, not prose.
-18. **A stray 422.** `power-report` says an unauthenticated request gets
+19. **A stray 422.** `power-report` says an unauthenticated request gets
     "401, not 422", but nothing else in the document returns 422, so it reads
     as a warning about a bug that is not described.
