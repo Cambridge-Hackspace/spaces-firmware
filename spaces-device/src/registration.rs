@@ -8,9 +8,62 @@ use serde::{Deserialize, Serialize};
 
 pub const PATH: &str = "/api/devices/register";
 
-#[derive(Debug, Clone, Serialize)]
+/// What the device declares about itself. `roles` is what it can be bound as;
+/// `enforcement` is the four questions CS:S's `ModuleCapabilities` asks about
+/// safety, and it is OPTIONAL on purpose. A caller that does not know the
+/// answers sends nothing, and the server applies its defaults -- which is what
+/// every caller did before these fields existed, byte for byte (a test pins
+/// that). A caller that knows sends all four, explicitly, because an unanswered
+/// safety question and a "no" are different claims and the server treats them
+/// differently (CS:S #209).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Capabilities {
     pub roles: Vec<String>,
+    /// Flattened, so the four names sit beside `roles` as the server reads
+    /// them. A `None` here emits nothing at all -- serde flattens an absent
+    /// Option to no fields -- which is what keeps a legacy caller's bytes
+    /// identical to v0.4.0's.
+    #[serde(flatten)]
+    pub enforcement: Option<Enforcement>,
+}
+
+/// The enforcement descriptors, named exactly as CS:S reads them
+/// (`css_lib::capabilities::ModuleCapabilities`). Declare only what the
+/// hardware does: the server lets an administrator rely on every one of these,
+/// and a claimed ability the device lacks is discovered as an interlock that
+/// does not interlock.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct Enforcement {
+    /// Conditions this device senses directly -- wired to it, not relayed.
+    pub local_inputs: Vec<String>,
+    /// Whether it can cut its own output without being told.
+    pub local_inhibit: bool,
+    /// Whether it supports an auto-off countdown a lease can ride (Zigbee's
+    /// on-with-timed-off and equivalents). Declare it only once measured.
+    pub countdown: bool,
+    /// Whether it keeps its last relay state when its link drops. The honest
+    /// answer for a relay with THIS firmware behind it is `false`: the lease
+    /// watchdog in `Module` cuts the output when renewals stop. For a bare
+    /// smart plug bridged from another broker it is `true`.
+    pub holds_last_on_disconnect: bool,
+}
+
+impl Capabilities {
+    /// Roles only; the safety questions left for the server's defaults.
+    pub fn roles(roles: &[&str]) -> Self {
+        Capabilities {
+            roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            enforcement: None,
+        }
+    }
+
+    /// Roles, and every safety question answered.
+    pub fn declared(roles: &[&str], enforcement: Enforcement) -> Self {
+        Capabilities {
+            roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            enforcement: Some(enforcement),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,7 +79,35 @@ pub struct RegisterRequest {
 }
 
 impl RegisterRequest {
-    /// A request declaring exactly the roles this device can actually perform.
+    /// The full form: capabilities as declared, and `platform` as the caller
+    /// knows it -- the server validates it against exactly
+    /// `windows|linux|macos|other`, so a host-side consumer says `linux` and an
+    /// ESP32 says `other`. Everything else in this file is a convenience over
+    /// this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        capabilities: Capabilities,
+        invite: &str,
+        name: &str,
+        mac_address: &str,
+        software_version: &str,
+        platform: &str,
+        ipv4_address: Option<String>,
+    ) -> Self {
+        RegisterRequest {
+            device_code: invite.to_string(),
+            name: name.to_string(),
+            capabilities,
+            mac_address: mac_address.to_string(),
+            software_version: software_version.to_string(),
+            platform: platform.to_string(),
+            ipv4_address,
+        }
+    }
+
+    /// A request declaring exactly the roles this device can actually perform,
+    /// and nothing about enforcement -- the server applies its defaults. The
+    /// wire form is unchanged from before `Enforcement` existed.
     ///
     /// `platform` is "other": it is not Windows, Linux or macOS.
     ///
@@ -48,17 +129,15 @@ impl RegisterRequest {
         software_version: &str,
         ipv4_address: Option<String>,
     ) -> Self {
-        RegisterRequest {
-            device_code: invite.to_string(),
-            name: name.to_string(),
-            capabilities: Capabilities {
-                roles: roles.iter().map(|r| (*r).to_string()).collect(),
-            },
-            mac_address: mac_address.to_string(),
-            software_version: software_version.to_string(),
-            platform: "other".into(),
+        Self::new(
+            Capabilities::roles(roles),
+            invite,
+            name,
+            mac_address,
+            software_version,
+            "other",
             ipv4_address,
-        }
+        )
     }
 
     /// A request from a class 1 module that both reads cards and switches a
@@ -152,6 +231,61 @@ pub fn parse_reply(status: u16, body: &[u8]) -> Result<Registered, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The wire a legacy caller produces is BYTE-IDENTICAL to v0.4.0's: no
+    /// enforcement key appears at all. This is what makes the change additive
+    /// -- a caller that did not answer the safety questions still sends no
+    /// answer, and the server's defaults, not a fabricated "no", apply. The
+    /// mutant is dropping `skip_serializing_if` on `enforcement`.
+    #[test]
+    fn a_caller_that_declares_nothing_sends_the_same_bytes_as_before() {
+        let r =
+            RegisterRequest::with_roles(&["power"], "INV", "p", "02:00:00:00:00:01", "0.1.0", None);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["capabilities"], json!({ "roles": ["power"] }));
+        assert_eq!(v["platform"], "other");
+    }
+
+    /// The cross-repo contract, firmware side: a declared request carries the
+    /// four descriptors under EXACTLY the names CS:S's `ModuleCapabilities`
+    /// reads. The same literal is pinned on the CS:S side (css_lib, #209), so
+    /// a rename on either side fails the other. The mutant is renaming any
+    /// field of `Enforcement`.
+    #[test]
+    fn a_declared_request_uses_the_names_the_server_reads() {
+        let r = RegisterRequest::new(
+            Capabilities::declared(
+                &["power"],
+                Enforcement {
+                    local_inputs: vec!["door_open".into()],
+                    local_inhibit: true,
+                    countdown: false,
+                    holds_last_on_disconnect: true,
+                },
+            ),
+            "INV",
+            "extractor",
+            "02:00:00:00:00:01",
+            "0.1.0",
+            "linux",
+            None,
+        );
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            v["capabilities"],
+            json!({
+                "roles": ["power"],
+                "local_inputs": ["door_open"],
+                "local_inhibit": true,
+                "countdown": false,
+                "holds_last_on_disconnect": true
+            })
+        );
+        assert_eq!(
+            v["platform"], "linux",
+            "platform is the caller's, not hardcoded"
+        );
+    }
 
     #[test]
     fn the_request_says_what_this_module_is() {
