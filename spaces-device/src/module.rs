@@ -1054,8 +1054,14 @@ impl Module {
         // authorization: the edge only leases a tool whose access chain it has
         // already satisfied, having consulted whatever read the badge.
         if !self.config.reads_cards {
+            // The note describes a TRANSITION, like the Set it accompanies.
+            // The edge refuses every second while nobody is signed on, and a
+            // plug that was never on has nothing to switch off; noting each
+            // refusal filled a journal at 2 Hz for as long as a tool sat idle
+            // (spaces-iot-bridge#18).
+            let was_leased = self.standing_lease.is_some();
             self.standing_lease = lease.grant.then(|| now.saturating_add(lease.ttl_ms));
-            if !lease.grant {
+            if !lease.grant && was_leased {
                 out.push(Action::Note("lease withdrawn; switching off".into()));
             }
             self.update_outputs(now, out);

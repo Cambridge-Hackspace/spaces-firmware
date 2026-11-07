@@ -1202,6 +1202,42 @@ fn a_plug_energizes_on_a_lease_alone() {
 }
 
 #[test]
+fn a_plug_notes_a_withdrawal_once_and_never_a_refusal_of_nothing() {
+    // The edge refuses every second while nobody is signed on. A plug that was
+    // never leased has nothing to switch off, and said so at 2 Hz in a journal
+    // (spaces-iot-bridge#18). The note is for the transition only: once when
+    // a held lease is withdrawn, and not again while refusals keep coming.
+    // The mutant is noting on every `grant: false`.
+    let notes = |out: &[Action]| {
+        out.iter()
+            .filter(|a| matches!(a, Action::Note(s) if s.contains("withdrawn")))
+            .count()
+    };
+    let mut m = plug();
+    // Idle: refused, refused, refused -- nothing to say.
+    for t in [100, 1_100, 2_100] {
+        assert_eq!(
+            notes(&m.message(topic::LEASE, &lease(ME, false, 3_000), t)),
+            0
+        );
+    }
+    // Leased, then withdrawn: exactly one note, with the OFF it describes.
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 3_000);
+    assert!(m.tool_is_on());
+    let out = m.message(topic::LEASE, &lease(ME, false, 3_000), 4_000);
+    assert_eq!(notes(&out), 1);
+    assert!(out.contains(&Action::Set {
+        output: Output::Tool,
+        on: false
+    }));
+    // Still refused: silent again.
+    assert_eq!(
+        notes(&m.message(topic::LEASE, &lease(ME, false, 3_000), 5_000)),
+        0
+    );
+}
+
+#[test]
 fn a_device_with_a_reader_still_refuses_a_lease_without_a_session() {
     // The other side: for a device that owns its session a lease is permission
     // to STAY closed, not to close. This arm must be scoped, not deleted.
