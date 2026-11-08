@@ -31,6 +31,9 @@ pub mod topic {
     /// This device is alive. Every role, on the heartbeat timer; see
     /// [`super::AliveRequest`] for why it exists (CS:S #170).
     pub const ALIVE_REQUEST: &str = "resource/request/alive";
+    /// A sensor's reading of one named interlock condition (CS:S #213).
+    /// Request-only: the lease is the feedback. See [`super::ConditionReport`].
+    pub const CONDITION_REQUEST: &str = "resource/request/condition";
 
     /// The answer to a scan: `authorized`, and on a yes for a resource with a
     /// latch, the `strike` pulse.
@@ -130,6 +133,26 @@ pub struct UsageReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AliveRequest {
     pub device_id: String,
+}
+
+/// `resource/request/condition` (CS:S #213): this device's reading of one of
+/// a resource's interlock conditions -- `door_open: true` means the door is
+/// open. The plain truth of the named condition; the coordinator knows which
+/// conditions are hazards and which are requirements, and it accepts a
+/// reading only from a device bound on the resource, only for a condition a
+/// rule on it names, and only from the rule's source binding where it has
+/// one.
+///
+/// Publish on every change AND on a timer of a few seconds: a condition the
+/// coordinator has never observed denies the tool, so a sensor that reports
+/// only on change leaves its tool denied until the first change. A reading
+/// counts as being alive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionReport {
+    pub device_id: String,
+    pub resource: String,
+    pub condition: String,
+    pub asserted: bool,
 }
 
 /// `resource/request/power`. Also the module's heartbeat: the edge counts a
