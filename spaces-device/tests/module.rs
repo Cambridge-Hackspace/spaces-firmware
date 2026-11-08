@@ -1833,6 +1833,7 @@ fn the_wire_is_resource_shaped() {
     assert_eq!(topic::USAGE_REQUEST, "resource/request/usage");
     assert_eq!(topic::POWER_REPORT, "resource/request/power");
     assert_eq!(topic::ALIVE_REQUEST, "resource/request/alive");
+    assert_eq!(topic::CONDITION_REQUEST, "resource/request/condition");
     assert_eq!(topic::SCAN_RESPONSE, "resource/response/scan");
     assert_eq!(topic::LEASE, "resource/lease");
     let mut m = module();
@@ -1974,4 +1975,20 @@ fn a_room_in_one_box_pulses_the_latch_and_keeps_the_tools_session_rules() {
     let stop = m.tool_off(2000);
     assert!(stop.contains(&Action::Outcome(Outcome::Ended(EndReason::ToolOff))));
     assert_eq!(published(&stop, topic::STOP_REQUEST)[0]["card"], ALICE);
+}
+
+/// The firmware half of the condition contract (CS:S #213): the same four
+/// fields, the same names, as css_lib's LocalCondition pins on the other side.
+#[test]
+fn a_condition_report_is_the_four_fields_the_coordinator_reads() {
+    let r = spaces_device::wire::ConditionReport {
+        device_id: "dev-1".into(),
+        resource: "laser-01".into(),
+        condition: "door_open".into(),
+        asserted: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&r).unwrap(),
+        json!({ "device_id": "dev-1", "resource": "laser-01", "condition": "door_open", "asserted": true })
+    );
 }
