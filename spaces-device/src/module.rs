@@ -55,7 +55,8 @@
 
 use crate::run_filter::RunFilter;
 use crate::wire::{
-    topic, AliveRequest, Lease, PowerReport, ScanReply, ScanRequest, StopRequest, UsageReport,
+    lease_ttl_ms, topic, AliveRequest, Lease, PowerReport, ScanReply, ScanRequest, ScanVerdict,
+    StopRequest, UsageReport,
 };
 
 /// The outputs a module drives.
@@ -957,8 +958,10 @@ impl Module {
         let log = UsageReport {
             resource: self.config.tool_id.clone(),
             card: card.map(str::to_string),
-            seconds: held_ms as f64 / 1000.0,
-            active_seconds: self.config.senses_running.then_some(raw_ms as f64 / 1000.0),
+            // f32 on the wire (CS:S's shape): a usage increment is at most a
+            // report interval, well inside its seven significant digits.
+            seconds: Some(held_ms as f32 / 1000.0),
+            active_seconds: self.config.senses_running.then_some(raw_ms as f32 / 1000.0),
             temperature: None,
         };
         Action::Publish {
@@ -986,8 +989,7 @@ impl Module {
                 if matches!(self.phase, Phase::Asking { .. }) {
                     out.push(Action::Note(format!(
                         "ignoring a scan answer about {} -- this module asked about {}",
-                        r.named().unwrap_or("?"),
-                        self.config.tool_id
+                        r.resource, self.config.tool_id
                     )));
                 }
                 return;
@@ -1100,7 +1102,9 @@ impl Module {
             // refusal filled a journal at 2 Hz for as long as a tool sat idle
             // (spaces-iot-bridge#18).
             let was_leased = self.standing_lease.is_some();
-            self.standing_lease = lease.grant.then(|| now.saturating_add(lease.ttl_ms));
+            self.standing_lease = lease
+                .grant
+                .then(|| now.saturating_add(lease_ttl_ms(&lease)));
             if !lease.grant && was_leased {
                 out.push(Action::Note("lease withdrawn; switching off".into()));
             }
@@ -1122,7 +1126,7 @@ impl Module {
                     lease.ttl_ms
                 )));
             }
-            session.lease_until = Some(now.saturating_add(lease.ttl_ms));
+            session.lease_until = Some(now.saturating_add(lease_ttl_ms(&lease)));
         }
         self.update_outputs(now, out);
     }
@@ -1372,6 +1376,8 @@ impl Module {
                 Some(self.tool_on)
             },
             self_tripped: None,
+            max_voltage: None,
+            amperage_limit: None,
         };
         out.push(Action::Publish {
             topic: topic::POWER_REPORT,

@@ -19,7 +19,7 @@ fn started(config: Config) -> Module {
 }
 
 fn yes() -> Vec<u8> {
-    json!({"authorized": true, "reason": "authorized"})
+    json!({"resource": TOOL, "authorized": true, "reason": "authorized"})
         .to_string()
         .into_bytes()
 }
@@ -48,7 +48,7 @@ fn a_reader_is_in_session_from_the_tap_until_it_ends() {
 fn a_reader_that_is_refused_is_not_in_session() {
     let mut m = started(Config::switches_nothing(ME, TOOL));
     m.input(ModuleInput::Swipe("CARD".into()), 10);
-    let no = json!({"authorized": false, "reason": "no"}).to_string();
+    let no = json!({"resource": TOOL, "authorized": false, "reason": "no"}).to_string();
     m.message(topic::SCAN_RESPONSE, no.as_bytes(), 100);
     assert!(!m.in_session());
 }

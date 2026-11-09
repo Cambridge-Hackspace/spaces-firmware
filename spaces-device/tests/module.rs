@@ -47,7 +47,7 @@ fn publishes_to(actions: &[Action]) -> Vec<&'static str> {
 }
 
 fn yes() -> Vec<u8> {
-    json!({"authorized": true, "reason": "authorized"})
+    json!({"resource": TOOL, "authorized": true, "reason": "authorized"})
         .to_string()
         .into_bytes()
 }
@@ -177,7 +177,7 @@ fn an_explicit_refusal_is_a_no() {
     m.swipe(BOB, 0);
     let out = m.message(
         topic::SCAN_RESPONSE,
-        br#"{"authorized":false,"reason":"Unknown card"}"#,
+        br#"{"resource":"laser-01","authorized":false,"reason":"Unknown card"}"#,
         100,
     );
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
@@ -188,9 +188,11 @@ fn an_explicit_refusal_is_a_no() {
 }
 
 #[test]
-fn the_documented_envelope_is_understood_too() {
-    // FIRMWARE.md describes the server's envelope on this topic; the edge sends
-    // {authorized}. Either form's explicit yes works.
+fn the_old_envelope_is_no_longer_a_yes() {
+    // The envelope FIRMWARE.md once described left the wire in CS:S #192, and
+    // the reply's shape is now CS:S's own (css_wire, #11): it does not parse,
+    // and an answer that does not parse is a no. Failing closed on it is the
+    // point; the mutant is reading `tool_on` again.
     let mut m = module();
     m.swipe(ALICE, 0);
     m.message(
@@ -199,7 +201,7 @@ fn the_documented_envelope_is_understood_too() {
         100,
     );
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
-    assert!(m.tool_is_on());
+    assert!(!m.tool_is_on());
 }
 
 #[test]
@@ -216,12 +218,15 @@ fn a_refusal_in_the_documented_envelope_is_a_no() {
 }
 
 #[test]
-fn any_explicit_no_beats_a_yes() {
+fn a_yes_missing_a_required_field_is_a_no() {
+    // `resource`, `authorized` and `reason` are all required in CS:S's shape.
+    // A reply short of one is not a reply this module can trust, however
+    // affirmative the rest of it looks.
     let mut m = module();
     m.swipe(ALICE, 0);
     m.message(
         topic::SCAN_RESPONSE,
-        br#"{"authorized":true,"tool_on":false}"#,
+        br#"{"resource":"laser-01","authorized":true}"#,
         100,
     );
     m.message(topic::LEASE, &lease(ME, true, 3000), 200);
@@ -668,20 +673,22 @@ fn a_yes_naming_our_tool_is_accepted() {
 }
 
 #[test]
-fn a_yes_naming_no_tool_is_still_accepted() {
-    // An edge predating CS:S #166 sends no `tool_id`. Refusing those would
-    // brick every module against an edge that has not been updated, so the
-    // absent case falls back to the reply window. Stated as a test because it
-    // is a deliberate hole, not an oversight: see ToolOnReply::is_for.
+fn a_yes_naming_no_resource_is_a_no() {
+    // This used to be a deliberate hole: an edge predating CS:S #166 echoed
+    // nothing, and refusing its replies would have bricked every module talking
+    // to it. That edge cannot be on the other end any more -- this module
+    // speaks only the resource/* topics of CS:S #182, which came after #166,
+    // and every edge that speaks them echoes the resource. So the hole is
+    // closed: such a reply does not parse, and it is a no.
     let mut m = module();
     m.swipe(ALICE, 0);
-    m.message(topic::SCAN_RESPONSE, &yes(), 100);
-    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
-    assert!(
-        m.tool_is_on(),
-        "a reply with no tool_id was dropped, which would break every module \
-         talking to an edge from before the echo existed"
+    m.message(
+        topic::SCAN_RESPONSE,
+        br#"{"authorized":true,"reason":"authorized"}"#,
+        100,
     );
+    m.message(topic::LEASE, &lease(ME, true, 3000), 200);
+    assert!(!m.tool_is_on());
 }
 
 // ------------------------------------------------- the two usage figures (#169)
@@ -1423,7 +1430,7 @@ fn a_refusal_carries_the_edges_own_words_to_the_panel() {
     m.swipe(BOB, 0);
     let out = m.message(
         topic::SCAN_RESPONSE,
-        br#"{"authorized":false,"reason":"Training required"}"#,
+        br#"{"resource":"laser-01","authorized":false,"reason":"Training required"}"#,
         100,
     );
     assert_eq!(
@@ -1975,7 +1982,8 @@ fn a_yes_that_names_no_pulse_releases_nothing_on_a_door_box() {
     // nothing to guess a duration from, and says so instead.
     let mut m = door_box();
     m.swipe(ALICE, 0);
-    let out = m.message(topic::SCAN_RESPONSE, &yes(), 100);
+    let no_pulse = json!({"resource": "front-door", "authorized": true, "reason": "authorized"});
+    let out = m.message(topic::SCAN_RESPONSE, no_pulse.to_string().as_bytes(), 100);
     assert!(sets(&out, Output::Strike).is_empty());
     assert!(!m.strike_is_on());
     assert!(out
@@ -2022,7 +2030,7 @@ fn a_device_that_drives_no_latch_ignores_the_strike() {
     // to release, and its session follows the tool's rules as before.
     let mut m = module();
     m.swipe(ALICE, 0);
-    let yes = json!({"resource": TOOL, "authorized": true, "strike": {"pulse_ms": 4200}})
+    let yes = json!({"resource": TOOL, "authorized": true, "reason": "authorized", "strike": {"pulse_ms": 4200}})
         .to_string()
         .into_bytes();
     let out = m.message(topic::SCAN_RESPONSE, &yes, 100);
@@ -2041,7 +2049,7 @@ fn a_room_in_one_box_pulses_the_latch_and_keeps_the_tools_session_rules() {
     let mut m = Module::new(c);
     m.start(0);
     m.swipe(ALICE, 0);
-    let yes = json!({"resource": "wood-shop", "authorized": true, "strike": {"pulse_ms": 1000}})
+    let yes = json!({"resource": "wood-shop", "authorized": true, "reason": "authorized", "strike": {"pulse_ms": 1000}})
         .to_string()
         .into_bytes();
     let out = m.message(topic::SCAN_RESPONSE, &yes, 100);
