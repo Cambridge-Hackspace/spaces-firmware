@@ -1,5 +1,9 @@
-//! The status light: one WS2812 RGB LED, showing [`Status`] in the patterns
-//! [`spaces_device::status`] defines.
+//! The status light: one LED, showing [`Status`] in the patterns
+//! [`spaces_device::status`] defines. Either a WS2812 RGB pixel, as on the C6
+//! Super Mini and Espressif's DevKitC-1 boards, in [`colour`]s; or a plain
+//! single-colour LED, as on the Seeed XIAO ESP32-C5, in the blink rhythms of
+//! [`lit`] (#16). Which one, and a plain LED's polarity, is the board's to say
+//! ([`Led`]).
 //!
 //! A thread of its own owns the LED and redraws it every [`FRAME`]; everything
 //! else just sets the status through a [`StatusLight`], which is cheap to clone
@@ -11,13 +15,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::hal::gpio::OutputPin;
+use esp_idf_svc::hal::gpio::{OutputPin, PinDriver};
 use esp_idf_svc::hal::rmt::config::{TransmitConfig, TxChannelConfig};
 use esp_idf_svc::hal::rmt::encoder::{BytesEncoder, BytesEncoderConfig};
 use esp_idf_svc::hal::rmt::{PinState, Symbol, TxChannelDriver};
 use esp_idf_svc::hal::units::Hertz;
 pub use spaces_device::status::Status;
-use spaces_device::status::{colour, Rgb};
+use spaces_device::status::{colour, lit, Rgb};
 
 /// How often the light is redrawn: fast enough that the setup pulse is smooth.
 const FRAME: Duration = Duration::from_millis(20);
@@ -33,6 +37,16 @@ const T0L: Duration = Duration::from_nanos(800);
 const T1H: Duration = Duration::from_nanos(700);
 const T1L: Duration = Duration::from_nanos(600);
 
+/// What kind of LED a board has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Led {
+    /// A WS2812 RGB pixel, driven over RMT.
+    Ws2812,
+    /// A plain single-colour LED on a GPIO. `active_low` is a LED that lights
+    /// when the pin is low: the XIAO ESP32-C5's user LED is.
+    Plain { active_low: bool },
+}
+
 #[derive(Clone)]
 pub struct StatusLight {
     status: Option<Arc<AtomicU8>>,
@@ -42,7 +56,21 @@ impl StatusLight {
     /// Start driving a WS2812 on `pin`, showing `initial`. If the LED cannot be
     /// started, says so in the log and returns a light that does nothing.
     pub fn start(pin: impl OutputPin + Send + 'static, initial: Status) -> StatusLight {
-        match Self::try_start(pin, initial) {
+        Self::start_led(pin, Led::Ws2812, initial)
+    }
+
+    /// Start driving `led` on `pin`, showing `initial`. As [`start`](Self::start),
+    /// for any kind of LED.
+    pub fn start_led(
+        pin: impl OutputPin + Send + 'static,
+        led: Led,
+        initial: Status,
+    ) -> StatusLight {
+        let started = match led {
+            Led::Ws2812 => Self::try_start(pin, initial),
+            Led::Plain { active_low } => Self::try_start_plain(pin, active_low, initial),
+        };
+        match started {
             Ok(light) => light,
             Err(e) => {
                 log::warn!("no status light: {e}");
@@ -110,6 +138,48 @@ impl StatusLight {
                 }
             })?;
         started_rx.recv()??;
+        Ok(StatusLight {
+            status: Some(shared),
+        })
+    }
+}
+
+impl StatusLight {
+    fn try_start_plain(
+        pin: impl OutputPin + Send + 'static,
+        active_low: bool,
+        initial: Status,
+    ) -> anyhow::Result<StatusLight> {
+        let shared = Arc::new(AtomicU8::new(initial as u8));
+        let status = shared.clone();
+        let mut led = PinDriver::output(pin)?;
+        // Dark until the first frame, whichever level dark is.
+        if active_low {
+            led.set_high()?;
+        } else {
+            led.set_low()?;
+        }
+        std::thread::Builder::new()
+            .stack_size(3072)
+            .spawn(move || {
+                let started = Instant::now();
+                let mut shown = None;
+                loop {
+                    let status =
+                        Status::from_u8(status.load(Ordering::Relaxed)).unwrap_or(Status::Failed);
+                    let want = lit(status, started.elapsed().as_millis() as u64);
+                    if shown != Some(want) {
+                        // Lit is the pin low on an active-low LED.
+                        let high = want != active_low;
+                        let set = if high { led.set_high() } else { led.set_low() };
+                        match set {
+                            Ok(()) => shown = Some(want),
+                            Err(e) => log::warn!("status light: {e}"),
+                        }
+                    }
+                    std::thread::sleep(FRAME);
+                }
+            })?;
         Ok(StatusLight {
             status: Some(shared),
         })

@@ -140,6 +140,40 @@ fn scale(colour: Rgb, level: u64, full: u64) -> Rgb {
     }
 }
 
+/// How a plain single-colour LED shows each status (#16), for boards without
+/// an RGB one. With no colour to tell them apart, every status gets its own
+/// rhythm, and none of them is "off": a light that is dark could be a board
+/// that is not powered.
+///
+/// | status | pattern |
+/// |---|---|
+/// | Setup | a double flash every two seconds |
+/// | Connecting | blinking, once a second, as the RGB light does |
+/// | Online | a brief flash every few seconds, as the RGB light does |
+/// | Broker lost | on, blinking off briefly once a second |
+/// | Failed | on, steady |
+/// | Updating | blinking fast, as the RGB light does |
+///
+/// Lost and Failed are both "mostly on", the plain light's way of saying
+/// trouble, and differ in whether it blinks off.
+pub fn lit(status: Status, now_ms: u64) -> bool {
+    match status {
+        Status::Setup => {
+            let phase = now_ms % SETUP_PERIOD_MS;
+            phase < PLAIN_FLASH_MS || (2 * PLAIN_FLASH_MS..3 * PLAIN_FLASH_MS).contains(&phase)
+        }
+        Status::Connecting => now_ms % BLINK_PERIOD_MS < BLINK_PERIOD_MS / 2,
+        Status::Online => now_ms % ONLINE_PERIOD_MS < ONLINE_FLASH_MS,
+        Status::BrokerLost => now_ms % BLINK_PERIOD_MS >= PLAIN_FLASH_MS,
+        Status::Failed => true,
+        Status::Updating => now_ms % UPDATING_PERIOD_MS < UPDATING_PERIOD_MS / 2,
+    }
+}
+
+/// One flash of the plain light's double flash, and one gap of its
+/// broker-lost blink.
+pub const PLAIN_FLASH_MS: u64 = 150;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +281,63 @@ mod tests {
             colour(Status::Setup, t + 1000).b,
             colour(Status::Setup, (t + 1000) % SETUP_PERIOD_MS).b
         );
+    }
+
+    /// The plain light's whole pattern over one long window, sampled every
+    /// 10 ms: enough to tell any two rhythms apart.
+    fn plain_trace(status: Status) -> Vec<bool> {
+        (0..12_000).step_by(10).map(|t| lit(status, t)).collect()
+    }
+
+    #[test]
+    fn a_plain_light_tells_every_status_apart() {
+        for (i, a) in Status::ALL.iter().enumerate() {
+            for b in &Status::ALL[i + 1..] {
+                assert_ne!(
+                    plain_trace(*a),
+                    plain_trace(*b),
+                    "{a:?} and {b:?} look the same on a plain LED"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_light_is_never_simply_dark() {
+        // Dark reads as unpowered. Every status lights at some point.
+        for s in Status::ALL {
+            assert!(plain_trace(s).contains(&true), "{s:?} never lights");
+        }
+    }
+
+    #[test]
+    fn a_plain_setup_light_double_flashes() {
+        let on: Vec<u64> = (0..SETUP_PERIOD_MS)
+            .filter(|&t| lit(Status::Setup, t))
+            .collect();
+        assert_eq!(on.len() as u64, 2 * PLAIN_FLASH_MS);
+        assert!(lit(Status::Setup, 0) && !lit(Status::Setup, PLAIN_FLASH_MS));
+        assert!(lit(Status::Setup, 2 * PLAIN_FLASH_MS));
+        assert!(!lit(Status::Setup, 3 * PLAIN_FLASH_MS));
+    }
+
+    #[test]
+    fn a_plain_light_keeps_the_rgb_rhythms_where_it_can() {
+        // Connecting, Online and Updating blink exactly as the RGB light
+        // does, so one description of the light serves both kinds of board.
+        for s in [Status::Connecting, Status::Online, Status::Updating] {
+            for t in (0..10_000).step_by(7) {
+                assert_eq!(lit(s, t), colour(s, t) != Rgb::OFF, "{s:?} at {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_trouble_is_mostly_on() {
+        let lost = (0..BLINK_PERIOD_MS)
+            .filter(|&t| lit(Status::BrokerLost, t))
+            .count() as u64;
+        assert_eq!(lost, BLINK_PERIOD_MS - PLAIN_FLASH_MS);
+        assert!((0..BLINK_PERIOD_MS).all(|t| lit(Status::Failed, t)));
     }
 }
