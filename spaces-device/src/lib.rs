@@ -5,6 +5,7 @@
 //!
 //! - [`wire`]: the messages a module exchanges with its edge, and their topics.
 //! - [`module`]: the state machine that decides what to do with them.
+//! - [`device`]: what any device is, to the loop that runs it.
 //! - [`run_filter`]: conditioning a machine's "working" signal into something
 //!   worth metering.
 //! - [`registration`]: claiming an invite.
@@ -14,6 +15,7 @@
 //! - [`setup_page`] and [`form`]: a device's own setup page.
 
 pub mod backoff;
+pub mod device;
 pub mod form;
 pub mod module;
 pub mod registration;
@@ -23,5 +25,6 @@ pub mod status;
 pub mod weblog;
 pub mod wire;
 
+pub use device::{Device, Effect, Link, ModuleInput};
 pub use module::{Action, Activity, Config, EndReason, Module, Outcome, Output, Usage};
 pub use run_filter::RunFilter;
