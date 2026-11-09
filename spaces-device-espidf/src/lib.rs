@@ -1,6 +1,7 @@
 //! Runs a Spaces module on ESP-IDF.
 //!
-//! - [`status_light`]: the RGB LED that shows what the module is doing.
+//! - [`status_light`]: the LED, RGB or plain, that shows what the module is
+//!   doing.
 //! - [`store`]: settings and credentials in flash.
 //! - [`wifi`]: joining a network, or hosting the setup one.
 //! - [`portal`]: the setup page.
