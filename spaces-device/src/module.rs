@@ -146,6 +146,17 @@ pub struct Usage {
     pub seconds: u64,
 }
 
+/// What a device has seen its remote relay do (#9). Fed to [`Module::observe`]
+/// by a device whose relay is out of its sight ([`Config::relay_is_remote`]);
+/// `None` in a field is "not known", and is reported as absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Observed {
+    /// Whether the relay is on, as last reported by whatever owns it.
+    pub relay_on: Option<bool>,
+    /// The draw it last reported, in amps, where it measures one.
+    pub draw_now: Option<f64>,
+}
+
 /// What a module needs to know about itself.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -278,6 +289,21 @@ pub struct Config {
     /// that was true before #174 and is the opposite of what the code below
     /// does now.)
     pub reads_cards: bool,
+    /// Whether the relay this device switches is out of its sight (#9).
+    ///
+    /// `false` -- the default, and every device with this firmware behind its
+    /// own relay -- reports `relay_on` from the state it commanded, because it
+    /// knows what it set. `true` is a device whose relay belongs to something
+    /// else that may or may not obey: a Zigbee plug driven over another broker
+    /// by spaces-iot-bridge. Its power report then carries only what was
+    /// [observed](Module::observe), and leaves each field out until something
+    /// has been: "cannot report", which is not `false`.
+    ///
+    /// The difference is a safety one. The edge leases a later start stage --
+    /// a laser -- only once the earlier one has reported `relay_on: true`, so a
+    /// device that reported what it *asked* for would let the laser start while
+    /// the extractor was still off.
+    pub relay_is_remote: bool,
 }
 
 impl Config {
@@ -306,6 +332,7 @@ impl Config {
             max_session_ms: 0,
             drives_latch: false,
             reads_cards: true,
+            relay_is_remote: false,
         }
     }
 
@@ -540,6 +567,9 @@ pub struct Module {
     /// Until when the latch is released (CS:S #182). `None` when it is not.
     strike_until: Option<u64>,
     last_report: Option<u64>,
+    /// What the remote relay was last seen doing (#9). Unused unless
+    /// [`Config::relay_is_remote`].
+    observed: Observed,
 }
 
 impl Module {
@@ -556,7 +586,17 @@ impl Module {
             strike_on: false,
             strike_until: None,
             last_report: None,
+            observed: Observed::default(),
         }
+    }
+
+    /// Record what the remote relay was seen doing (#9). Only a device with
+    /// [`Config::relay_is_remote`] reports it; the next power report carries
+    /// it, and every one after until something new is observed. Pass
+    /// `Observed::default()` when the owner goes quiet, so the report goes
+    /// back to saying nothing rather than repeating a stale claim.
+    pub fn observe(&mut self, seen: Observed) {
+        self.observed = seen;
     }
 
     /// Whether the latch is released, as last set.
@@ -1312,9 +1352,25 @@ impl Module {
             // The report still goes out: it is the plug's telemetry, and it
             // counts as being alive too for edges that predate the pulse. The
             // pulse below is the liveness contract proper (CS:S #170).
-            draw_now: self.config.gates_power.then_some(draw),
+            //
+            // A remote relay (#9) reports only what was observed: the
+            // commanded state and the two draw constants are claims about a
+            // relay this device does not own.
+            draw_now: if !self.config.gates_power {
+                None
+            } else if self.config.relay_is_remote {
+                self.observed.draw_now
+            } else {
+                Some(draw)
+            },
             voltage_now: None,
-            relay_on: self.config.gates_power.then_some(self.tool_on),
+            relay_on: if !self.config.gates_power {
+                None
+            } else if self.config.relay_is_remote {
+                self.observed.relay_on
+            } else {
+                Some(self.tool_on)
+            },
             self_tripped: None,
         };
         out.push(Action::Publish {
