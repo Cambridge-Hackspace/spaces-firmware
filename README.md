@@ -40,7 +40,7 @@ device may do both.
 | `spaces-device/` | the protocol core: no hardware, no I/O, host-tested |
 | `spaces-device-espidf/` | running it on ESP-IDF |
 | `examples/buttons/` | the demo firmware |
-| `tools/fake-edge/` | a stand-in edge, for testing a module and breaking things on cue |
+| `tools/fake-edge/` | a fault injector standing in for the edge: stops leases, withdraws a grant, sends bad replies, on cue |
 | `docs/FINDINGS.md` | what FIRMWARE.md did not say |
 | `docs/SUPER-MINI.md` | getting firmware onto an ESP32-C6 Super Mini |
 | `partitions.csv` | two app slots, for updates over the air |
@@ -167,17 +167,22 @@ board's RGB LED is the status light:
 3. An administrator binds the device to the tool in the **`power`** role. Any
    other role can start a session, but only a `power` module is leased, so
    nothing would keep the tool on.
-4. Run an edge. For the demo, the stand-in in `tools/fake-edge` will do:
+4. Run the real edge, registered with the same Spaces server and on the same
+   broker. Steps 1-3, 7 and 8 below run against it: who is allowed, which tool
+   is in use and which module is alive are its decisions, and a copy of them
+   would drift.
+
+   Steps 4-6 break things on cue, which the real edge will not do. For those,
+   stop the edge and run the fault injector in its place:
 
    ```sh
    pip install -r tools/fake-edge/requirements.txt
    python3 tools/fake-edge/fake_edge.py --broker <the broker> \
-       --username edge --password-file <file> --allow <Alice's card>
+       --username edge --password-file <file>
    ```
 
-   It answers like the real edge, leases every second for three, and takes
-   commands typed into it to break things on purpose (listed at the top of the
-   file).
+   It answers every request yes and leases while a session is open; the faults
+   are commands typed into it, listed at the top of the file.
 
 Keep the module's log open, at `http://<the module>/log` or over USB with
 `espflash monitor`: it narrates every message in and out.
@@ -192,7 +197,7 @@ Keep the module's log open, at `http://<the module>/log` or over USB with
 3. **Flip Running on and off a few times, then press Tool off.** The module
    reports `tool-log` with the running time, then `tool-off`. *A metered tool
    bills for the time the machine worked, not the time the session was open.*
-4. **Alice again, then type `pause` into the fake edge.** No message is sent;
+4. **With the fault injector running: Alice, then type `pause` into it.** No message is sent;
    the leases just stop. Within three seconds the Tool LED goes out, and the
    module reports the session over. *Silence is the instruction to stop. This
    is what happens when the edge dies or the network goes.* Type `resume`:
@@ -200,9 +205,11 @@ Keep the module's log open, at `http://<the module>/log` or over USB with
    needs a new swipe.*
 5. **Alice again, then `revoke`.** The edge withdraws the lease outright, and
    the LED goes out at once. *A courtesy: the mechanism is still the timer.*
-6. **`ok`, then Alice.** The edge answers `{"status": "ok"}` and nothing else.
-   Tool stays off. *"OK" is not "yes".* (`ignore` and `late` show a reply that
-   never comes, and one that comes after the module has given up.)
+6. **`partial`, then Alice.** The answer names the resource and a reason, but
+   carries no `authorized`. Tool stays off. *Only `authorized: true` is a yes.*
+   (`garbage` is a reply that does not parse; `ignore` and `late` show a reply
+   that never comes, and one that comes after the module has given up. Each is
+   a no.) Then stop the injector and start the real edge again.
 7. **Stop the broker,** or unplug the edge's network. Status light: steady
    amber, and the tool, if it was on, is off within three seconds. Start it
    again: green flashes, no restart needed.

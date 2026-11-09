@@ -41,9 +41,10 @@ also means nobody could have shipped a working module from the document alone.
 
 *What we did:* a yes is an explicit `authorized: true` or `tool_on: true`, and
 an explicit `false` in either field wins. Everything else, including a missing
-reply, is a no. Tested in `spaces-device/tests/module.rs`. The fake edge
-(`tools/fake-edge`) can answer in either format (`doc` and `edge` commands),
-so a module can be checked against both.
+reply, is a no. Tested in `spaces-device/tests/module.rs`. The document's
+envelope has since left the wire (CS:S #192), and the fault injector in
+`tools/fake-edge` no longer speaks it; its `partial` command sends a reply with
+no `authorized` at all, which is the case that still matters.
 
 ### 2. A module must not call `boot-reset`
 
@@ -107,9 +108,10 @@ Found only on the first run against a real edge; the fake edge, written from
 the document, accepted the string.
 
 *What we did:* `draw_now` is a JSON number on the local broker. Tested in
-`spaces-device/tests/module.rs`, and the fake edge now drops a report with a
-string `draw_now`, as the real one does. `voltage_now` is untried: this module
-does not send it. The document should give the local topic's types, or the
+`spaces-device/tests/module.rs`. The fake edge no longer judges reports at all:
+normal bench runs use the real edge, and the fake one keeps only fault
+injection (#10), so it cannot hide a difference like this again. `voltage_now`
+is untried: this module does not send it. The document should give the local topic's types, or the
 edge should accept both.
 
 ## Silent: what a module author has to guess
