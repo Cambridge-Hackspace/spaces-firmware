@@ -39,12 +39,13 @@ reference edge's reply on `toolguard/response/tool-on` is
 A module following the document never starts a tool. That fails safe, but it
 also means nobody could have shipped a working module from the document alone.
 
-*What we did:* a yes is an explicit `authorized: true` or `tool_on: true`, and
-an explicit `false` in either field wins. Everything else, including a missing
-reply, is a no. Tested in `spaces-device/tests/module.rs`. The document's
-envelope has since left the wire (CS:S #192), and the fault injector in
-`tools/fake-edge` no longer speaks it; its `partial` command sends a reply with
-no `authorized` at all, which is the case that still matters.
+*What we did:* a yes is an explicit `authorized: true`. Everything else,
+including a missing reply, is a no. The document's envelope has since left the
+wire (CS:S #192), and since #11 the reply's shape is CS:S's own (`css_wire`),
+which requires `resource`, `authorized` and `reason`: the old envelope, or a
+reply short of any of those, does not parse and is a no. Tested in
+`spaces-device/tests/module.rs`. The fault injector's `partial` command sends a
+reply with no `authorized` at all, which is the case that still matters.
 
 ### 2. A module must not call `boot-reset`
 
@@ -152,11 +153,12 @@ the reply, or better a request id the module chooses.
 
 **FIXED UPSTREAM, 2026-10-23 — CS:S #166.** The edge now echoes `tool_id` in
 the tool-on reply, which is what the paragraph above asked for, and
-`ToolOnReply::is_for` drops a reply naming another tool before the verdict is
-read. The bound is worth stating exactly: the protocol gap is closed **against
-an edge carrying #166**, and an older edge sends no `tool_id` at all, where the
-absent field falls back to the five-second single-request window above. So the
-weaker guard is still load-bearing and stays. The door half of the same model
+`ScanVerdict::is_for` drops a reply naming another resource before the verdict
+is read. Since #11 a reply naming no resource does not parse and is a no: the
+allowance for edges older than #166 could no longer be reached, because this
+module speaks only the `resource/*` topics of CS:S #182, which came after #166,
+and every edge that speaks them echoes the resource. The five-second
+single-request window stays, as the guard for a reply that never comes. The door half of the same model
 had always echoed `door_id`; the tool half simply never did.
 
 Related: `toolguard/request/tool-on` carries no `device_id` either, so the edge

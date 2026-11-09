@@ -8,5 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The local-broker vocabulary, defined once in CS:S and shared by both ends of
+# the wire (#11, CS:S #219). Pinned to a tag, never a branch. serde-only by
+# construction: CS:S checks that it stays so, because this crate builds it for
+# an ESP32.
+css_wire = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "css_wire-v0.1.0" }
 serde.workspace = true
 serde_json.workspace = true

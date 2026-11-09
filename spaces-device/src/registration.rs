@@ -27,26 +27,19 @@ pub struct Capabilities {
     pub enforcement: Option<Enforcement>,
 }
 
-/// The enforcement descriptors, named exactly as CS:S reads them
-/// (`css_lib::capabilities::ModuleCapabilities`). Declare only what the
+/// The enforcement descriptors: CS:S's own type, from `css_wire` (#11), so the
+/// names cannot drift from what the server reads. Declare only what the
 /// hardware does: the server lets an administrator rely on every one of these,
 /// and a claimed ability the device lacks is discovered as an interlock that
 /// does not interlock.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
-pub struct Enforcement {
-    /// Conditions this device senses directly -- wired to it, not relayed.
-    pub local_inputs: Vec<String>,
-    /// Whether it can cut its own output without being told.
-    pub local_inhibit: bool,
-    /// Whether it supports an auto-off countdown a lease can ride (Zigbee's
-    /// on-with-timed-off and equivalents). Declare it only once measured.
-    pub countdown: bool,
-    /// Whether it keeps its last relay state when its link drops. The honest
-    /// answer for a relay with THIS firmware behind it is `false`: the lease
-    /// watchdog in `Module` cuts the output when renewals stop. For a bare
-    /// smart plug bridged from another broker it is `true`.
-    pub holds_last_on_disconnect: bool,
-}
+///
+/// `holds_last_on_disconnect` is the one to think about. The honest answer for
+/// a relay with THIS firmware behind it is `false`: the lease watchdog in
+/// `Module` cuts the output when renewals stop. For a bare smart plug bridged
+/// from another broker it is `true`. `Default` says `true` -- CS:S's
+/// conservative default, which assumes the plug -- where this crate's own copy
+/// used to say `false`; set it explicitly either way.
+pub type Enforcement = css_wire::capabilities::ModuleCapabilities;
 
 impl Capabilities {
     /// Roles only; the safety questions left for the server's defaults.
