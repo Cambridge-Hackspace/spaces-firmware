@@ -30,6 +30,9 @@ pub struct Wifi {
     /// attempt that has already failed finds out without waiting it out.
     disconnects: Arc<AtomicU32>,
     last_reason: Arc<AtomicU32>,
+    /// Associated with the network right now, from the same subscription: what
+    /// `run` reports as the device's Wi-Fi state (#7).
+    up: Arc<AtomicBool>,
     _disconnects: EspSubscription<'static, System>,
 }
 
@@ -43,12 +46,18 @@ impl Wifi {
         let rejoin = Arc::new(AtomicBool::new(false));
         let disconnects = Arc::new(AtomicU32::new(0));
         let last_reason = Arc::new(AtomicU32::new(0));
+        let up = Arc::new(AtomicBool::new(false));
         let subscription = {
             let rejoin = rejoin.clone();
             let disconnects = disconnects.clone();
             let last_reason = last_reason.clone();
+            let up = up.clone();
             sysloop.subscribe::<WifiEvent, _>(move |event| {
+                if let WifiEvent::StaConnected(_) = event {
+                    up.store(true, Ordering::Release);
+                }
                 if let WifiEvent::StaDisconnected(why) = event {
+                    up.store(false, Ordering::Release);
                     // The 802.11 reason code is the only clue to why a join
                     // failed or a link dropped, so it is always logged.
                     log::warn!("Wi-Fi disconnected, reason {}", why.reason());
@@ -73,8 +82,14 @@ impl Wifi {
             rejoin,
             disconnects,
             last_reason,
+            up,
             _disconnects: subscription,
         })
+    }
+
+    /// Whether the station is associated with its network right now.
+    pub fn is_up(&self) -> bool {
+        self.up.load(Ordering::Acquire)
     }
 
     /// Join `ssid`, trying for as long as it takes, and return the address we
