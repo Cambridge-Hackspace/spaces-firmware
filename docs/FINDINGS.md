@@ -41,9 +41,10 @@ also means nobody could have shipped a working module from the document alone.
 
 *What we did:* a yes is an explicit `authorized: true` or `tool_on: true`, and
 an explicit `false` in either field wins. Everything else, including a missing
-reply, is a no. Tested in `spaces-device/tests/module.rs`. The fake edge
-(`tools/fake-edge`) can answer in either format (`doc` and `edge` commands),
-so a module can be checked against both.
+reply, is a no. Tested in `spaces-device/tests/module.rs`. The document's
+envelope has since left the wire (CS:S #192), and the fault injector in
+`tools/fake-edge` no longer speaks it; its `partial` command sends a reply with
+no `authorized` at all, which is the case that still matters.
 
 ### 2. A module must not call `boot-reset`
 
