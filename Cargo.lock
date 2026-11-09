@@ -1245,6 +1245,7 @@ name = "spaces-device"
 version = "0.8.0"
 dependencies = [
  "css_wire",
+ "embedded-hal 1.0.0",
  "serde",
  "serde_json",
 ]
