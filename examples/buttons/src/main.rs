@@ -6,7 +6,7 @@
 //! | GPIO | Part | Meaning |
 //! |---|---|---|
 //! | 18 | button | Alice swipes her card |
-//! | 19 | button | Bob swipes his |
+//! | 14 | button | Bob swipes his |
 //! | 20 | button | Tool off |
 //! | 21 | switch | The machine is running (e.g. a laser firing) |
 //! | 22 | LED | The tool is powered: authorized *and* leased |
@@ -21,7 +21,7 @@
 //! before restarting after an error.
 
 use std::ffi::CStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use std::sync::mpsc;
@@ -29,6 +29,7 @@ use std::sync::mpsc;
 use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use spaces_device::input::Debounced;
 use spaces_device::{Action, Config, Module, ModuleInput};
 use spaces_device_espidf::run::{Event, Hardware};
 use spaces_device_espidf::status_light::{Status, StatusLight};
@@ -153,7 +154,7 @@ fn main() -> anyhow::Result<()> {
             Event::Input(ModuleInput::Swipe(alice)),
         ),
         (
-            PinDriver::input(pins.gpio19, Pull::Up)?,
+            PinDriver::input(pins.gpio14, Pull::Up)?,
             Event::Input(ModuleInput::Swipe(bob)),
         ),
         (
@@ -238,37 +239,22 @@ fn read_inputs(
     running: PinDriver<'static, Input>,
     sender: mpsc::Sender<Event<ModuleInput>>,
 ) {
-    let mut pressed = [false; 3];
-    let mut was_running = false;
-    let mut steady = [0u8; 4];
+    let mut debounced = [
+        Debounced::button(),
+        Debounced::button(),
+        Debounced::button(),
+    ];
+    let mut switch = Debounced::switch();
+    let start = Instant::now();
     loop {
-        for (i, (pin, event)) in buttons.iter().enumerate() {
-            let now = pin.is_low();
-            // Debounce: act only once the pin has read the new state for
-            // three samples running (30 ms).
-            if now != pressed[i] {
-                steady[i] += 1;
-                if steady[i] >= 3 {
-                    pressed[i] = now;
-                    steady[i] = 0;
-                    if now {
-                        let _ = sender.send(event.clone());
-                    }
-                }
-            } else {
-                steady[i] = 0;
+        let now = start.elapsed().as_millis() as u64;
+        for ((pin, event), input) in buttons.iter().zip(&mut debounced) {
+            if input.sample(now, pin.is_low()) == Some(true) {
+                let _ = sender.send(event.clone());
             }
         }
-        let now = running.is_low();
-        if now != was_running {
-            steady[3] += 1;
-            if steady[3] >= 3 {
-                was_running = now;
-                steady[3] = 0;
-                let _ = sender.send(Event::Input(ModuleInput::Running(now)));
-            }
-        } else {
-            steady[3] = 0;
+        if let Some(on) = switch.sample(now, running.is_low()) {
+            let _ = sender.send(Event::Input(ModuleInput::Running(on)));
         }
         std::thread::sleep(Duration::from_millis(10));
     }

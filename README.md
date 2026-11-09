@@ -136,7 +136,7 @@ An ESP32-C6 Super Mini on a breadboard, and:
 | GPIO | Connect | Meaning |
 |---|---|---|
 | 18 | button to GND | Alice presents her card |
-| 19 | button to GND | Bob presents his |
+| 14 | button to GND | Bob presents his |
 | 20 | button to GND | Tool off |
 | 21 | switch to GND | the machine is running (a laser firing, say) |
 | 22 | resistor, then green LED, to GND | **Tool**: powered, authorized *and* leased |
@@ -224,7 +224,7 @@ in a scan reply and a module drops an answer about another resource before readi
 its verdict. **Against an edge without #166 it is still one module per broker** —
 such an edge names no tool, and all a module has then is the five-second
 single-outstanding-request window, which narrows the race without closing it.
-See [docs/FINDINGS.md](docs/FINDINGS.md), finding 7.
+See [docs/FINDINGS.md](docs/FINDINGS.md), finding 8.
 
 ## License
 
