@@ -30,8 +30,8 @@ use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use spaces_device::input::Debounced;
-use spaces_device::Config;
-use spaces_device_espidf::run::{Event, Outputs};
+use spaces_device::{Action, Config, Module, ModuleInput};
+use spaces_device_espidf::run::{Event, Hardware};
 use spaces_device_espidf::status_light::{Status, StatusLight};
 use spaces_device_espidf::store::{self, Field};
 use spaces_device_espidf::update::Updates;
@@ -151,10 +151,16 @@ fn main() -> anyhow::Result<()> {
     let buttons = [
         (
             PinDriver::input(pins.gpio18, Pull::Up)?,
-            Event::Swipe(alice),
+            Event::Input(ModuleInput::Swipe(alice)),
         ),
-        (PinDriver::input(pins.gpio14, Pull::Up)?, Event::Swipe(bob)),
-        (PinDriver::input(pins.gpio20, Pull::Up)?, Event::ToolOff),
+        (
+            PinDriver::input(pins.gpio14, Pull::Up)?,
+            Event::Input(ModuleInput::Swipe(bob)),
+        ),
+        (
+            PinDriver::input(pins.gpio20, Pull::Up)?,
+            Event::Input(ModuleInput::ToolOff),
+        ),
     ];
     let running = PinDriver::input(pins.gpio21, Pull::Up)?;
     let button_sender = sender.clone();
@@ -181,7 +187,7 @@ fn main() -> anyhow::Result<()> {
     // on every scan-line return, so an installation driven by one wants a hold
     // of several seconds or it meters one engrave as hundreds of fragments.
     // See `spaces_device::run_filter`.
-    match spaces_device_espidf::run::run(&online, config, outputs, sender, events) {
+    match spaces_device_espidf::run::run(&online, Module::new(config), outputs, sender, events) {
         Err(e) => log::error!("{e:#}"),
         Ok(never) => match never {},
     }
@@ -197,7 +203,21 @@ struct Leds {
     running: PinDriver<'static, Output>,
 }
 
-impl Outputs for Leds {
+impl Hardware<Module> for Leds {
+    /// Publishes and log lines are the loop's; what reaches here is the
+    /// LEDs, and what happened, for the serial narration.
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Set { output, on } => {
+                log::info!("{output:?} {}", if on { "ON" } else { "off" });
+                self.set(output, on);
+            }
+            other => log::info!("{other:?}"),
+        }
+    }
+}
+
+impl Leds {
     fn set(&mut self, output: spaces_device::Output, on: bool) {
         let pin = match output {
             spaces_device::Output::Tool => &mut self.tool,
@@ -215,9 +235,9 @@ impl Outputs for Leds {
 /// counts once per press; the switch reports both directions. Pins read low
 /// when pressed, because they are pulled up and wired to ground.
 fn read_inputs(
-    buttons: [(PinDriver<'static, Input>, Event); 3],
+    buttons: [(PinDriver<'static, Input>, Event<ModuleInput>); 3],
     running: PinDriver<'static, Input>,
-    sender: mpsc::Sender<Event>,
+    sender: mpsc::Sender<Event<ModuleInput>>,
 ) {
     let mut debounced = [
         Debounced::button(),
@@ -234,7 +254,7 @@ fn read_inputs(
             }
         }
         if let Some(on) = switch.sample(now, running.is_low()) {
-            let _ = sender.send(Event::Running(on));
+            let _ = sender.send(Event::Input(ModuleInput::Running(on)));
         }
         std::thread::sleep(Duration::from_millis(10));
     }

@@ -5,7 +5,9 @@
 
 use serde_json::{json, Value};
 use spaces_device::wire::topic;
-use spaces_device::{Action, Activity, Config, EndReason, Module, Outcome, Output, Usage};
+use spaces_device::{
+    Action, Activity, Config, EndReason, Module, Observed, Outcome, Output, Usage,
+};
 
 const ME: &str = "dev-uuid-me";
 const TOOL: &str = "laser-01";
@@ -1051,6 +1053,85 @@ fn a_device_that_switches_nothing_reports_no_relay_state_and_no_draw() {
         "claimed a relay state: {report}"
     );
     assert!(report.get("draw_now").is_none(), "claimed a draw: {report}");
+}
+
+/// A plug whose relay is out of its sight (#9): a Zigbee plug driven over
+/// another broker by spaces-iot-bridge.
+fn remote_plug() -> Module {
+    let mut c = Config::power_only(ME, TOOL);
+    c.relay_is_remote = true;
+    let mut m = Module::new(c);
+    m.start(0);
+    m
+}
+
+/// The power report a heartbeat at `now` publishes.
+fn report_at(m: &mut Module, now: u64) -> Value {
+    published(&m.tick(now), topic::POWER_REPORT)
+        .pop()
+        .expect("a heartbeat was due")
+}
+
+#[test]
+fn a_remote_relay_reports_nothing_it_has_not_seen_whatever_it_commanded() {
+    // The edge leases a laser only once the extractor ahead of it has reported
+    // `relay_on: true`. A bridge that reported what it ASKED the plug to do
+    // would start the laser while the extractor was still off. The mutant is
+    // reporting the commanded state for a remote relay.
+    let mut m = remote_plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    assert!(m.tool_is_on(), "the plug was told to switch on");
+    let report = report_at(&mut m, 1_100);
+    assert!(
+        report.get("relay_on").is_none(),
+        "claimed a relay state nobody observed: {report}"
+    );
+    assert!(
+        report.get("draw_now").is_none(),
+        "claimed the made-up draw constant: {report}"
+    );
+}
+
+#[test]
+fn a_remote_relay_reports_what_was_observed_and_forgets_it_when_told() {
+    let mut m = remote_plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    m.observe(Observed {
+        relay_on: Some(true),
+        draw_now: Some(1.5),
+    });
+    let report = report_at(&mut m, 1_100);
+    assert_eq!(report["relay_on"], true);
+    assert_eq!(report["draw_now"], 1.5);
+
+    // Seen off while still commanded on: the observation wins, both ways.
+    m.observe(Observed {
+        relay_on: Some(false),
+        draw_now: None,
+    });
+    let report = report_at(&mut m, 2_100);
+    assert_eq!(report["relay_on"], false);
+    assert!(report.get("draw_now").is_none(), "{report}");
+
+    // The owner went quiet: back to saying nothing, not a stale claim.
+    m.observe(Observed::default());
+    let report = report_at(&mut m, 3_100);
+    assert!(report.get("relay_on").is_none(), "{report}");
+}
+
+#[test]
+fn a_local_relay_still_reports_what_it_commanded() {
+    // The default is unchanged by #9: firmware behind its own relay knows what
+    // it set, and an observation it is handed is not a reason to doubt it.
+    let mut m = plug();
+    m.message(topic::LEASE, &lease(ME, true, 3_000), 100);
+    m.observe(Observed {
+        relay_on: Some(false),
+        draw_now: Some(9.9),
+    });
+    let report = report_at(&mut m, 1_100);
+    assert_eq!(report["relay_on"], true);
+    assert_eq!(report["draw_now"], Config::power_only(ME, TOOL).draw_idle);
 }
 
 #[test]
