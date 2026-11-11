@@ -6,7 +6,7 @@
 //! driving. Before this trait it drove exactly one kind, [`Module`], through
 //! an `Event` enum closed around the demo's buttons, so a badge reader that
 //! wrapped a `Module` in more behaviour had to rebuild the whole loop for
-//! itself, and missed what the loop did besides (spaces-toolguard-firmware #1,
+//! itself, and missed what the loop did besides (spaces-toolguard-device #1,
 //! #2, #5).
 //!
 //! So a device is anything that can:
