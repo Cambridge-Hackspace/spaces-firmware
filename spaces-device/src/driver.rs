@@ -2,7 +2,7 @@
 //!
 //! Every runtime that connects a device to its edge's broker has to get the
 //! same few things right, and each used to get them right on its own:
-//! `spaces-device-espidf::run`, a copy of it in spaces-toolguard-firmware, and
+//! `spaces-device-espidf::run`, a copy of it in spaces-toolguard-device, and
 //! a host loop in spaces-iot-bridge. The rules:
 //!
 //! - **Subscribe again on every connect.** The session is clean, so the broker
