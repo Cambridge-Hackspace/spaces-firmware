@@ -28,6 +28,24 @@ lease, `drives_latch` releases a latch for exactly the pulse the edge names in
 its yes (`Output::Strike`, for a device bound in the **`strike`** role), and a
 device may do both.
 
+**Since 0.10 a module signs the local wire** (CS:S #249) whenever registration
+issued it a `command_key`: everything it sends is sealed with HMAC-SHA256 under
+that key, and it believes no lease, scan answer or hello that is not sealed
+for it, fresh, and newer than the last. An unsigned lease -- which anyone who
+can publish on the broker could send -- energizes nothing. There is no clock
+in it: the first message each way after a boot is refused as stale and
+teaches the other end's nonce, and the edge answers with `resource/hello` so a
+device that only sends learns it too. See `Module::signing` and rule 8 in
+`spaces-device/src/module.rs`.
+
+**Upgrade the edge first.** A module that signs needs an edge that seals for
+it on every resource, which is CS:S 0.6.1 and later; an older edge seals only
+on a resource set to require it, and a signing module ignores everything else
+it sends. A deployment that issues no `command_key` is unchanged. The cost on
+the chip is about 0.2 ms of CPU per message and a few hundred bytes of RAM;
+the flash it adds is in the release notes. `tools/fake-edge` seals too, given
+the device's key with `--keys-file`.
+
 > Work in progress. The demo runs the protocol end to end against a stand-in
 > edge, and takes firmware updates over the network; a real edge is next. What
 > the protocol document gets wrong or leaves open, found while writing this, is

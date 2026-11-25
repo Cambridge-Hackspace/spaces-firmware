@@ -187,7 +187,9 @@ fn main() -> anyhow::Result<()> {
     // on every scan-line return, so an installation driven by one wants a hold
     // of several seconds or it meters one engrave as hundreds of fragments.
     // See `spaces_device::run_filter`.
-    match spaces_device_espidf::run::run(&online, Module::new(config), outputs, sender, events) {
+    // Signing the local wire whenever registration issued a key (CS:S #249).
+    let module = online.module(config);
+    match spaces_device_espidf::run::run(&online, module, outputs, sender, events) {
         Err(e) => log::error!("{e:#}"),
         Ok(never) => match never {},
     }

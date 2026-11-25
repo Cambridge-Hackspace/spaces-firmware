@@ -2075,6 +2075,9 @@ fn a_condition_report_is_the_four_fields_the_coordinator_reads() {
         resource: "laser-01".into(),
         condition: "door_open".into(),
         asserted: true,
+        // Unsigned: a seal that is absent is not on the wire at all, so the
+        // four fields below are still the whole of it.
+        seal: None,
     };
     assert_eq!(
         serde_json::to_value(&r).unwrap(),

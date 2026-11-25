@@ -33,5 +33,7 @@ pub mod wire;
 
 pub use device::{Device, Effect, Link, ModuleInput};
 pub use driver::{Driver, Level, LinkEvent, Step};
-pub use module::{Action, Activity, Config, EndReason, Module, Observed, Outcome, Output, Usage};
+pub use module::{
+    Action, Activity, Config, EndReason, Module, Observed, Outcome, Output, Usage, STOP_RESEND_MS,
+};
 pub use run_filter::RunFilter;

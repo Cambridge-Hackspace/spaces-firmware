@@ -52,12 +52,81 @@
 //!    held one that [`crate::run_filter`] bridges, and the raw asserted one.
 //!    Which of them bills is the tool's setting on the server, not this
 //!    module's choice.
+//! 8. **A module that holds its key signs, and believes nothing unsigned**
+//!    (CS:S #249, [`Module::signing`]). Everything it sends is sealed; a lease,
+//!    a scan answer or a hello is acted on only if it is sealed for this
+//!    device under its key, names this module's current nonce, and is newer
+//!    than the last one from that sender. Anything else -- unsigned, wrongly
+//!    signed, replayed, or another device's copy -- is ignored, never taken as
+//!    a no and never as a yes: a forged refusal is as much a forgery as a
+//!    forged grant, and a missing answer already ends in a no by timeout. The
+//!    edge seals for a device it holds a key for on every resource, so this
+//!    holds whether or not the resource requires signed messages.
+//!
+//!    There is no clock in it. Each end draws a nonce at boot; the first
+//!    message each way is refused as stale and teaches the other end's
+//!    nonce, and the edge answers a stale message with a hello so that a
+//!    device which only sends still learns it. When this module learns a new
+//!    edge nonce it sends again what that edge refused: the scan it is still
+//!    waiting on, and the last stop if it is recent. A usage increment is not
+//!    sent again -- no acknowledgement says which reports arrived, so a resend
+//!    could bill twice -- and one sent to an edge in the moment it restarted
+//!    is lost, as it would have been before signing.
 
 use crate::run_filter::RunFilter;
 use crate::wire::{
-    lease_ttl_ms, topic, AliveRequest, Lease, PowerReport, ScanReply, ScanRequest, ScanVerdict,
-    StopRequest, UsageReport,
+    lease_ttl_ms, topic, AliveRequest, Lease, LocalHello, PowerReport, ScanReply, ScanRequest,
+    ScanVerdict, StopRequest, UsageReport,
 };
+use css_wire::seal::Sealed;
+use css_wire_sign::{Peer, Refused};
+
+/// How long after a stop it is still sent again, to an edge that turns out to
+/// have restarted and refused it. A stop is safe to repeat -- one that lands on
+/// no session is harmless -- so the window is generous: it covers an edge that
+/// takes a while to come back. Past it, the session is the server's sweep's.
+pub const STOP_RESEND_MS: u64 = 60_000;
+
+/// What signing needs: the key, this end's view of the edge, and where a fresh
+/// nonce comes from. See rule 8.
+struct Signing {
+    /// The `command_key` string's own bytes, exactly as registration gave it.
+    key: Vec<u8>,
+    peer: Peer,
+    /// A fresh nonce: 16 random bytes as hex. Called at the start and when the
+    /// peer must draw a new one; the firmware's, since this crate has no
+    /// randomness.
+    nonces: Box<dyn FnMut() -> String + Send>,
+    /// The last stop sent, unsealed, and when: sent again if the edge turns
+    /// out to have a new nonce. A stop is sealed to the nonce held when it is
+    /// sent, so a nonce learned after it is one that stop did not name -- the
+    /// edge behind it refused it.
+    last_stop: Option<(StopRequest, u64)>,
+    /// The last thing refused and why, so a lease refused twice a second is
+    /// said once, not twice a second. Cleared by anything believed.
+    last_refusal: Option<(&'static str, Refused)>,
+    /// Whether, since the last scan went out, an answer about this resource
+    /// arrived that was not sealed for this device. Said when the scan times
+    /// out, because it is the one clue that the edge does not seal at all.
+    unsealed_answer: bool,
+}
+
+impl Signing {
+    fn note_refusal(&mut self, topic: &'static str, why: Refused, out: &mut Vec<Action>) {
+        if self.last_refusal == Some((topic, why)) {
+            return;
+        }
+        self.last_refusal = Some((topic, why));
+        out.push(Action::Note(format!(
+            "ignoring a {} on {topic}: not believed while this device signs",
+            match why {
+                Refused::Unsigned => "message with no seal",
+                Refused::BadSignature => "message whose seal does not check out",
+                Refused::Stale => "stale or repeated message",
+            }
+        )));
+    }
+}
 
 /// The outputs a module drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +640,8 @@ pub struct Module {
     /// What the remote relay was last seen doing (#9). Unused unless
     /// [`Config::relay_is_remote`].
     observed: Observed,
+    /// Present once [`Module::signing`] gave it a key (CS:S #249).
+    signing: Option<Signing>,
 }
 
 impl Module {
@@ -588,7 +659,43 @@ impl Module {
             strike_until: None,
             last_report: None,
             observed: Observed::default(),
+            signing: None,
         }
+    }
+
+    /// Sign the local wire with `key`, this device's `command_key` as
+    /// registration gave it (CS:S #249). From then on everything this module
+    /// sends is sealed and names this device, and it believes no lease, scan
+    /// answer or hello that is not sealed for it; see rule 8.
+    ///
+    /// `nonces` must return 16 fresh random bytes as hex each time it is
+    /// called -- the hardware random generator on an ESP32, with the radio on.
+    /// A predictable nonce lets a recorded message be replayed after a reboot.
+    ///
+    /// **Only for a device whose edge seals**, which is CS:S 0.6.1 and later
+    /// for every device it holds a key for. An older edge seals only on a
+    /// resource that requires it, and a signing device ignores everything
+    /// else that edge sends.
+    pub fn signing(
+        mut self,
+        key: impl Into<Vec<u8>>,
+        mut nonces: impl FnMut() -> String + Send + 'static,
+    ) -> Self {
+        let peer = Peer::new(nonces());
+        self.signing = Some(Signing {
+            key: key.into(),
+            peer,
+            nonces: Box::new(nonces),
+            last_stop: None,
+            last_refusal: None,
+            unsealed_answer: false,
+        });
+        self
+    }
+
+    /// Whether this module signs.
+    pub fn signs(&self) -> bool {
+        self.signing.is_some()
     }
 
     /// Record what the remote relay was seen doing (#9). Only a device with
@@ -702,7 +809,7 @@ impl Module {
         match &self.phase {
             Phase::Idle { .. } => {
                 out.push(Action::Note(format!("asking the edge about card {card}")));
-                out.push(self.scan_request(card));
+                out.push(self.scan_request(card, now));
                 self.phase = Phase::Asking {
                     card: card.to_string(),
                     since: now,
@@ -761,7 +868,7 @@ impl Module {
                 out.push(Action::Note(
                     "stop pressed; releasing the resource without a card".into(),
                 ));
-                out.push(self.stop_request(None));
+                out.push(self.stop_request(None, now));
             }
         }
         out
@@ -786,6 +893,7 @@ impl Module {
         match topic_name {
             topic::SCAN_RESPONSE => self.on_reply(payload, now, &mut out),
             topic::LEASE => self.on_lease(payload, now, &mut out),
+            topic::HELLO => self.on_hello(payload, now, &mut out),
             // Acknowledgements. Not instructions, and never a reason to stay on.
             topic::STOP_RESPONSE | topic::USAGE_RESPONSE | topic::POWER_RESPONSE => {}
             other => out.push(Action::Note(format!("ignoring message on {other}"))),
@@ -876,6 +984,16 @@ impl Module {
                 out.push(Action::Note(format!(
                     "no answer about card {card}: refused (a timeout is a no)"
                 )));
+                if let Some(signing) = self.signing.as_mut() {
+                    if std::mem::take(&mut signing.unsealed_answer) {
+                        out.push(Action::Note(
+                            "an answer about this resource did arrive, but not sealed for this \
+                             device; is the edge older than CS:S 0.6.1, or without this \
+                             device's key?"
+                                .into(),
+                        ));
+                    }
+                }
                 out.push(Action::Outcome(Outcome::NoAnswer));
                 self.phase = Phase::Idle {
                     abandoned: Some((card, now)),
@@ -940,7 +1058,13 @@ impl Module {
     /// meter ([`Config::reports_usage`]), in which case nothing goes out and
     /// the clocks are simply never read. The one gate for all three callers:
     /// the periodic report, a session's end, a plug's meter closing.
-    fn report_usage(&self, out: &mut Vec<Action>, card: Option<&str>, held_ms: u64, raw_ms: u64) {
+    fn report_usage(
+        &mut self,
+        out: &mut Vec<Action>,
+        card: Option<&str>,
+        held_ms: u64,
+        raw_ms: u64,
+    ) {
         if !self.config.reports_usage {
             return;
         }
@@ -954,7 +1078,7 @@ impl Module {
     /// absent falls back to the billable figure, zero bills nothing. `card` is
     /// omitted by a plug, which never learns one: the server attributes the
     /// usage to whoever is signed on to the tool (CS:S #174).
-    fn usage_action(&self, card: Option<&str>, held_ms: u64, raw_ms: u64) -> Action {
+    fn usage_action(&mut self, card: Option<&str>, held_ms: u64, raw_ms: u64) -> Action {
         let log = UsageReport {
             resource: self.config.tool_id.clone(),
             card: card.map(str::to_string),
@@ -963,15 +1087,122 @@ impl Module {
             seconds: Some(held_ms as f32 / 1000.0),
             active_seconds: self.config.senses_running.then_some(raw_ms as f32 / 1000.0),
             temperature: None,
+            device_id: self.named(),
+            seal: None,
         };
-        Action::Publish {
-            topic: topic::USAGE_REQUEST,
-            payload: serde_json::to_string(&log).expect("a UsageReport always serializes"),
+        self.publish(log)
+    }
+
+    /// This device's id, on a request that may name it: always when it signs,
+    /// since the edge finds the key by it; never otherwise, as before.
+    fn named(&self) -> Option<String> {
+        self.signing.as_ref().map(|_| self.config.device_id.clone())
+    }
+
+    /// The one way anything is sent: sealed when this device signs, on the
+    /// topic the message's own type names, so a payload cannot go out under
+    /// another topic than the one its seal covers.
+    fn publish<M: Sealed + serde::Serialize>(&mut self, mut msg: M) -> Action {
+        if let Some(signing) = self.signing.as_mut() {
+            signing.peer.seal(&signing.key, &mut msg);
         }
+        Action::Publish {
+            topic: M::TOPIC,
+            payload: serde_json::to_string(&msg).expect("a local message always serializes"),
+        }
+    }
+
+    /// Whether to act on `msg`, which named this device: always when it does
+    /// not sign; otherwise only when sealed, checking out and fresh. Either
+    /// way, a message whose seal checks out teaches the edge's nonce, and
+    /// learning a new one sends again what that edge refused.
+    fn believe<M: Sealed>(
+        &mut self,
+        msg: &M,
+        topic: &'static str,
+        now: u64,
+        out: &mut Vec<Action>,
+    ) -> bool {
+        let Some(signing) = self.signing.as_mut() else {
+            return true;
+        };
+        let before = signing.peer.theirs().map(str::to_string);
+        let nonces = &mut signing.nonces;
+        let verdict = signing.peer.open(&signing.key, msg, nonces);
+        match verdict {
+            Ok(()) => signing.last_refusal = None,
+            Err(why) => signing.note_refusal(topic, why, out),
+        }
+        let learned = signing.peer.theirs().map(str::to_string);
+        if learned.is_some() && learned != before {
+            self.resend_refused(now, out);
+        }
+        verdict.is_ok()
+    }
+
+    /// The edge has a nonce this module had not sealed to: whatever it sent
+    /// that edge since was refused as stale. Send again what matters -- see
+    /// rule 8 for what is not.
+    fn resend_refused(&mut self, now: u64, out: &mut Vec<Action>) {
+        if let Phase::Asking { card, .. } = &self.phase {
+            let card = card.clone();
+            out.push(Action::Note(format!(
+                "the edge was not yet heard from; asking about card {card} again"
+            )));
+            out.push(self.scan_request(&card, now));
+        }
+        let stop = self.signing.as_mut().and_then(|s| {
+            s.last_stop
+                .take_if(|(_, at)| now.saturating_sub(*at) <= STOP_RESEND_MS)
+        });
+        if let Some((stop, _)) = stop {
+            out.push(Action::Note(
+                "the edge refused the last stop as stale; sending it again".into(),
+            ));
+            out.push(self.stop_request(stop.card.as_deref(), now));
+        }
+    }
+
+    fn on_hello(&mut self, payload: &[u8], now: u64, out: &mut Vec<Action>) {
+        if self.signing.is_none() {
+            return;
+        }
+        let Ok(hello) = serde_json::from_slice::<LocalHello>(payload) else {
+            return;
+        };
+        // Every module on the broker hears every hello. The device id is
+        // signed, so another's would fail the check anyway; this spares the
+        // HMAC for each one overheard.
+        if hello.device_id != self.config.device_id {
+            return;
+        }
+        // Believed or stale alike, it has taught the edge's nonce, and that is
+        // all a hello carries.
+        self.believe(&hello, topic::HELLO, now, out);
     }
 
     fn on_reply(&mut self, payload: &[u8], now: u64, out: &mut Vec<Action>) {
         let reply: Option<ScanReply> = serde_json::from_slice(payload).ok();
+
+        // SIGNED (rule 8): only a reply sealed for THIS device is an answer at
+        // all. The edge sends one copy per device bound to the resource, each
+        // naming it, and on a resource that requires nothing the unsigned reply
+        // as well; any of those not ours, or not sealed, is ignored outright --
+        // including one that does not parse, which unsigned would be a no.
+        if self.signing.is_some() {
+            let Some(r) = &reply else { return };
+            if r.device_id.as_deref() != Some(self.config.device_id.as_str()) {
+                if r.is_for(&self.config.tool_id) && matches!(self.phase, Phase::Asking { .. }) {
+                    if let Some(s) = self.signing.as_mut() {
+                        s.unsealed_answer |= r.seal.is_none();
+                    }
+                }
+                return;
+            }
+            if !self.believe(r, topic::SCAN_RESPONSE, now, out) {
+                return;
+            }
+        }
 
         // IS IT MINE, BEFORE IS IT YES (CS:S #166). Every module on the local
         // broker receives every answer on this topic -- it is unnamespaced and
@@ -1073,7 +1304,7 @@ impl Module {
                 out.push(Action::Note(format!(
                     "a late yes for card {card} arrived after giving up; releasing the tool"
                 )));
-                out.push(self.stop_request(Some(&card)));
+                out.push(self.stop_request(Some(&card), now));
                 self.phase = Phase::Idle { abandoned: None };
             }
             _ => {
@@ -1091,6 +1322,13 @@ impl Module {
         };
         if lease.device_id != self.config.device_id {
             return; // every module on the broker sees every lease
+        }
+        // SIGNED (rule 8): an unsigned or replayed lease is nobody's word, and
+        // that includes a withdrawal -- a forged `grant: false` is as much a
+        // forgery as a forged grant. The lease this module holds runs out on
+        // its own if the real ones stop.
+        if !self.believe(&lease, topic::LEASE, now, out) {
+            return;
         }
         // A plug has no session, and for it the lease is the whole
         // authorization: the edge only leases a tool whose access chain it has
@@ -1187,7 +1425,7 @@ impl Module {
         if !(reported_before && d_held == 0 && d_raw == 0) {
             self.report_usage(out, Some(&card), d_held, d_raw);
         }
-        out.push(self.stop_request(Some(&card)));
+        out.push(self.stop_request(Some(&card), now));
         // After the release, not before: the panel saying "session ended" while
         // the tool is still energized is the one ordering a member could act on
         // and be wrong about.
@@ -1378,45 +1616,53 @@ impl Module {
             self_tripped: None,
             max_voltage: None,
             amperage_limit: None,
+            seal: None,
         };
-        out.push(Action::Publish {
-            topic: topic::POWER_REPORT,
-            payload: serde_json::to_string(&report).expect("a PowerReport always serializes"),
-        });
+        let report = self.publish(report);
+        out.push(report);
 
         // The pulse (CS:S #170). Every role, every heartbeat. A reader or a
         // sensor has no power to report, and the server refuses a relayed power
         // report for anything not bound as `power` -- so without this they were
         // invisible to the server and, under the default `fail_off`, a reader
         // denied its own tool a lease forever.
+        //
+        // Signed, it is also how this module first meets its edge: sent at
+        // start, sealed to no edge nonce, refused as stale, and answered with
+        // the hello that teaches the edge's.
         let alive = AliveRequest {
             device_id: self.config.device_id.clone(),
+            seal: None,
         };
-        out.push(Action::Publish {
-            topic: topic::ALIVE_REQUEST,
-            payload: serde_json::to_string(&alive).expect("an AliveRequest always serializes"),
-        });
+        let alive = self.publish(alive);
+        out.push(alive);
     }
 
-    fn scan_request(&self, card: &str) -> Action {
+    fn scan_request(&mut self, card: &str, _now: u64) -> Action {
+        if let Some(s) = self.signing.as_mut() {
+            s.unsealed_answer = false;
+        }
         let request = ScanRequest {
             resource: self.config.tool_id.clone(),
             card: card.to_string(),
+            device_id: self.named(),
+            seal: None,
         };
-        Action::Publish {
-            topic: topic::SCAN_REQUEST,
-            payload: serde_json::to_string(&request).expect("a ScanRequest always serializes"),
-        }
+        self.publish(request)
     }
 
-    fn stop_request(&self, card: Option<&str>) -> Action {
+    fn stop_request(&mut self, card: Option<&str>, now: u64) -> Action {
         let request = StopRequest {
             resource: self.config.tool_id.clone(),
             card: card.map(str::to_string),
+            device_id: self.named(),
+            seal: None,
         };
-        Action::Publish {
-            topic: topic::STOP_REQUEST,
-            payload: serde_json::to_string(&request).expect("a StopRequest always serializes"),
+        // Kept, in case the edge it is sealed for has restarted and refuses
+        // it (rule 8).
+        if let Some(s) = self.signing.as_mut() {
+            s.last_stop = Some((request.clone(), now));
         }
+        self.publish(request)
     }
 }
