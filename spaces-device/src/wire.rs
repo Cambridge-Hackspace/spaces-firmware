@@ -18,8 +18,8 @@
 //! `resource`, and nothing here says door or tool.
 
 pub use css_wire::{
-    local, LocalAliveRequest, LocalCondition, LocalPower, LocalScan, LocalScanReply, LocalStop,
-    LocalStrike, LocalUsage, ResourceLeasePayload,
+    local, LocalAliveRequest, LocalCondition, LocalHello, LocalMember, LocalPower, LocalScan,
+    LocalScanReply, LocalStop, LocalStrike, LocalUsage, ResourceLeasePayload,
 };
 
 /// The local-broker topics a module uses, by the names this crate has always
@@ -44,6 +44,9 @@ pub mod topic {
     pub const POWER_RESPONSE: &str = local::POWER_REPORT_RESPONSE;
     /// `css_wire::local::RESOURCE_LEASE`.
     pub const LEASE: &str = local::RESOURCE_LEASE;
+    /// The edge's nonce, sealed for a module whose signed message it found
+    /// stale (CS:S #249). Nothing else; see [`crate::module`] on signing.
+    pub const HELLO: &str = local::HELLO;
 
     /// Everything a module subscribes to. With a clean session the broker
     /// forgets subscriptions when the link drops, so these must be subscribed
@@ -54,6 +57,7 @@ pub mod topic {
         USAGE_RESPONSE,
         POWER_RESPONSE,
         LEASE,
+        HELLO,
     ];
 }
 

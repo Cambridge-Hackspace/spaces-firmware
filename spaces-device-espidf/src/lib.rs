@@ -43,6 +43,42 @@ pub struct Online {
     pub update_server: Option<esp_idf_svc::http::server::EspHttpServer<'static>>,
 }
 
+impl Online {
+    /// The [`Module`](spaces_device::Module) for `config`, signing the local
+    /// wire when registration issued this device a `command_key` (CS:S #249):
+    /// from then on it seals what it sends and believes nothing unsealed. A
+    /// device with no key speaks unsigned, as before.
+    ///
+    /// **Needs an edge that seals for it** -- CS:S 0.6.1 or later, which does
+    /// so for every device it holds a key for. Upgrade the edge first.
+    pub fn module(&self, config: spaces_device::Config) -> spaces_device::Module {
+        let module = spaces_device::Module::new(config);
+        match spaces_device::registration::command_key(&self.credentials.mqtt_config) {
+            Some(key) => {
+                log::info!("signing the local wire with this device's command key (CS:S #249)");
+                module.signing(key.as_bytes().to_vec(), nonce)
+            }
+            None => {
+                log::warn!(
+                    "no command key from registration: the local wire is unsigned, and anyone \
+                     who can publish on the broker can send this device a lease"
+                );
+                module
+            }
+        }
+    }
+}
+
+/// 16 bytes from the hardware random number generator, as hex: a nonce for
+/// signing the local wire. True random once the radio is on, which it is
+/// before a module talks to its edge.
+pub fn nonce() -> String {
+    let mut bytes = [0u8; 16];
+    // SAFETY: esp_fill_random writes exactly `len` bytes to the buffer given.
+    unsafe { esp_idf_svc::sys::esp_fill_random(bytes.as_mut_ptr().cast(), bytes.len()) };
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Watch a button (BOOT, on the demo) and, once it has been held for three
 /// seconds, restart into setup mode.
 ///

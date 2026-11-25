@@ -16,6 +16,8 @@ produce on cue:
     late        answer the next request with a yes, 8 s late
     partial     answer the next request with no `authorized` field at all
     garbage     answer the next request with something that is not JSON
+    unsigned    answer the next request with no seal (with --keys-file: a
+                module that signs must not believe it)
     status      show what it thinks is going on
     quit
 
@@ -34,11 +36,25 @@ your shell history):
     fake_edge.py --broker 192.168.1.10 --username edge \
         --password-file ~/.fake-edge-password
 
+For a module that signs the local wire (CS:S #249), give its key in a file
+of `device_id command_key` lines, so the key is never on the command line:
+
+    fake_edge.py --broker 192.168.1.10 --keys-file ~/.fake-edge-keys
+
+It then seals every lease and answer for each device in the file, one copy of
+an answer per device as the real edge does, and answers a sealed message that
+names no nonce of its own with `resource/hello`. It checks NOTHING it is sent:
+it takes a module's nonce from its seal unverified, because a fault injector
+that refused a module would be testing itself. The real edge checks.
+
 Needs paho-mqtt (pip install paho-mqtt). The tests beside it do not.
 """
 
 import argparse
+import hashlib
+import hmac
 import json
+import os
 import sys
 import threading
 import time
@@ -54,9 +70,80 @@ STOP_RESPONSE = "resource/response/stop"
 USAGE_RESPONSE = "resource/response/usage"
 POWER_RESPONSE = "resource/response/power"
 LEASE = "resource/lease"
+HELLO = "resource/hello"
 
 REQUESTS = (SCAN_REQUEST, STOP_REQUEST, USAGE_REQUEST, POWER_REPORT, ALIVE_REQUEST)
-FAULTS = ("ignore", "late", "partial", "garbage")
+FAULTS = ("ignore", "late", "partial", "garbage", "unsigned")
+
+
+# -- the seal (FIRMWARE.md, "Signing the local wire") ----------------------
+
+def _item(v):
+    b = v.encode() if isinstance(v, str) else v
+    return str(len(b)).encode() + b":" + b
+
+
+def _opt(v):
+    return b"~" if v is None else _item(str(v))
+
+
+def _member(m):
+    m = m or {}
+    return _opt(m.get("id")) + _opt(m.get("name"))
+
+
+def _fields(topic, m):
+    """Each topic's own fields, in the document's order: only the three an
+    edge sends."""
+    if topic == LEASE:
+        return (_item(m["resource"]) + _item(str(m["grant"]).lower())
+                + _item(str(m["ttl_ms"])) + _member(m.get("member")))
+    if topic == SCAN_RESPONSE:
+        sign_in = m.get("sign_in")
+        sign_in_bytes = b"~~" if not sign_in else (
+            _item(sign_in["kind"])
+            + _item(sign_in.get("code") or sign_in.get("ticket") or sign_in.get("reason")))
+        return (_item(m["resource"]) + _item(str(m["authorized"]).lower())
+                + _item(m["reason"]) + _opt((m.get("strike") or {}).get("pulse_ms"))
+                + _member(m.get("member")) + sign_in_bytes)
+    if topic == HELLO:
+        return b""
+    raise ValueError(f"the fake edge does not seal {topic}")
+
+
+def canonical(topic, m, frm, to, seq):
+    return (_item("css-local/1") + _item(topic) + _item(m["device_id"]) + _item(frm)
+            + _item(to) + _item(str(seq)) + _fields(topic, m))
+
+
+def sealed(topic, m, key, frm, to, seq):
+    """`m` with its seal: HMAC-SHA256 under the key string's own bytes."""
+    sig = hmac.new(key.encode(), canonical(topic, m, frm, to, seq), hashlib.sha256).hexdigest()
+    return {**m, "seal": {"from": frm, "to": to, "seq": seq, "sig": sig}}
+
+
+def read_keys(path):
+    keys = {}
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 2 and not line.lstrip().startswith("#"):
+                keys[parts[0]] = parts[1]
+    return keys
+
+
+class Sealer:
+    """One device's side of the seal, as an edge keeps it -- minus checking."""
+
+    def __init__(self, key, nonce=None):
+        self.key = key
+        self.mine = nonce or os.urandom(16).hex()
+        self.theirs = ""
+        self.seq = 0
+
+    def seal(self, topic, m):
+        self.seq += 1
+        return sealed(topic, m, self.key, self.mine, self.theirs, self.seq)
 
 
 def log(direction, text):
@@ -65,7 +152,7 @@ def log(direction, text):
 
 
 class FakeEdge:
-    def __init__(self, client, ttl_ms, tool_uuid, strike_ms=0):
+    def __init__(self, client, ttl_ms, tool_uuid, strike_ms=0, keys=None):
         self.client = client
         self.ttl_ms = ttl_ms
         # The real edge sends the resource's UUID in a lease, not its external id.
@@ -78,6 +165,8 @@ class FakeEdge:
         self.devices = set()
         self.leasing = True
         self.next_fault = None
+        # Per device with a key: what it takes to seal for it (CS:S #249).
+        self.sealers = {device: Sealer(key) for device, key in (keys or {}).items()}
 
     # -- outgoing ---------------------------------------------------------
 
@@ -94,13 +183,34 @@ class FakeEdge:
         return reply
 
     def lease(self, device, grant, reason=None):
-        return {
+        lease = {
             "resource": self.tool_uuid,
             "device_id": device,
             "grant": grant,
             "ttl_ms": self.ttl_ms,
             "reason": reason,
         }
+        sealer = self.sealers.get(device)
+        return sealer.seal(LEASE, lease) if sealer else lease
+
+    def answer(self, reply, unsigned=False):
+        """A scan answer as the real edge sends it: one copy sealed for each
+        device with a key, and the unsigned one for everything else."""
+        if not unsigned:
+            for device, sealer in sorted(self.sealers.items()):
+                self.publish(SCAN_RESPONSE, sealer.seal(SCAN_RESPONSE, {**reply, "device_id": device}))
+        self.publish(SCAN_RESPONSE, reply)
+
+    def learn(self, msg):
+        """Take a module's nonce from its seal, unverified, and say hello when
+        what it sent named no nonce of ours: the module learns ours from it."""
+        seal, device = msg.get("seal"), msg.get("device_id")
+        sealer = self.sealers.get(device)
+        if not seal or not sealer:
+            return
+        sealer.theirs = seal.get("from", "")
+        if seal.get("to") != sealer.mine:
+            self.publish(HELLO, sealer.seal(HELLO, {"device_id": device}))
 
     # -- incoming ---------------------------------------------------------
 
@@ -112,6 +222,7 @@ class FakeEdge:
             log("!!", "that did not parse; ignored")
             return
         with self.lock:
+            self.learn(msg)
             if topic == SCAN_REQUEST:
                 self.scan(msg.get("resource"))
             elif topic == STOP_REQUEST:
@@ -137,14 +248,20 @@ class FakeEdge:
             self.publish(SCAN_RESPONSE, {"resource": resource, "reason": "ok"})
         elif fault == "garbage":
             self.publish(SCAN_RESPONSE, "this is not JSON")
+        elif fault == "unsigned":
+            # The rule this breaks, for a module that signs: nothing unsealed
+            # is believed, a yes least of all.
+            log("..", "answering yes with no seal")
+            self.sessions.add(resource)
+            self.answer(self.yes(resource), unsigned=True)
         else:
             self.sessions.add(resource)
-            self.publish(SCAN_RESPONSE, self.yes(resource))
+            self.answer(self.yes(resource))
 
     def late_yes(self, resource):
         with self.lock:
             self.sessions.add(resource)
-            self.publish(SCAN_RESPONSE, self.yes(resource))
+            self.answer(self.yes(resource))
 
     # -- the lease loop ---------------------------------------------------
 
@@ -201,6 +318,9 @@ def main():
     parser.add_argument("--username")
     parser.add_argument("--password-file",
                         help="a file whose first line is the broker password")
+    parser.add_argument("--keys-file",
+                        help="a file of `device_id command_key` lines: seal for those "
+                             "devices, which sign the local wire (CS:S #249)")
     args = parser.parse_args()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="fake-edge")
@@ -210,7 +330,8 @@ def main():
             with open(args.password_file) as f:
                 password = f.readline().rstrip("\n")
         client.username_pw_set(args.username, password)
-    edge = FakeEdge(client, args.ttl_ms, args.tool_uuid, args.strike_ms)
+    keys = read_keys(args.keys_file) if args.keys_file else {}
+    edge = FakeEdge(client, args.ttl_ms, args.tool_uuid, args.strike_ms, keys)
 
     def on_connect(client, _userdata, _flags, reason, _props):
         log("..", f"connected to {args.broker}:{args.port} ({reason})")

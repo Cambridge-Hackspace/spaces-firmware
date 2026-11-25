@@ -12,7 +12,17 @@ rust-version.workspace = true
 # the wire (#11, CS:S #219). Pinned to a tag, never a branch. serde-only by
 # construction: CS:S checks that it stays so, because this crate builds it for
 # an ESP32.
-css_wire = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "css_wire-v0.1.0" }
+css_wire = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "v0.6.0" }
+# Signing the local wire (CS:S #249): HMAC-SHA256 over css_wire's canonical
+# bytes, and the nonces that make a sealed message fresh. hmac and sha2, pure
+# Rust; no source of randomness, which the firmware supplies.
+#
+# Both by the ONE CS:S release tag, v0.6.0 (css_wire 0.3.0, css_wire_sign
+# 0.1.0). css_wire_sign names css_wire by path within that checkout, and cargo
+# takes two different tags as two sources even on one commit: pinning each by
+# its own crate tag builds css_wire twice, and the seal traits of one copy are
+# not the other's.
+css_wire_sign = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "v0.6.0" }
 serde.workspace = true
 serde_json.workspace = true
 # The I2C trait, so `i2c` finds parts on any bus and is tested with a fake one.

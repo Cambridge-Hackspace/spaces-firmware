@@ -189,6 +189,19 @@ struct Data {
     mqtt_config: serde_json::Value,
 }
 
+/// The `command_key` registration issued, from the `mqtt_config` kept whole:
+/// the key a module signs the local wire with (CS:S #249). `None` when the
+/// server issued none -- a deployment with no card cipher -- or an empty one,
+/// and such a module speaks unsigned, as before.
+///
+/// The string itself is the key: its own bytes, never decoded from hex.
+pub fn command_key(mqtt_config: &serde_json::Value) -> Option<&str> {
+    mqtt_config
+        .get("command_key")?
+        .as_str()
+        .filter(|k| !k.is_empty())
+}
+
 /// Read the server's reply. Anything but a clear success with both
 /// identifiers is an error, with the server's own words where it gave some.
 pub fn parse_reply(status: u16, body: &[u8]) -> Result<Registered, String> {
@@ -330,6 +343,32 @@ mod tests {
             serde_json::to_value(&b).unwrap(),
             "reader_and_power must be exactly with_roles([reader, power])"
         );
+    }
+
+    #[test]
+    fn the_command_key_is_read_from_the_kept_mqtt_config() {
+        assert_eq!(
+            command_key(&json!({"mqtt_namespace": "cs/spaces", "command_key": "4f3c"})),
+            Some("4f3c")
+        );
+        // Kept as the string, never hex-decoded: the bytes are its own.
+        assert_eq!(
+            command_key(&json!({"command_key": "0a0b"})).map(str::as_bytes),
+            Some(&b"0a0b"[..])
+        );
+    }
+
+    #[test]
+    fn no_command_key_is_none_whatever_its_shape() {
+        for v in [
+            json!(null),
+            json!({}),
+            json!({"command_key": null}),
+            json!({"command_key": ""}),
+            json!({"command_key": 42}),
+        ] {
+            assert_eq!(command_key(&v), None, "{v}");
+        }
     }
 
     #[test]
