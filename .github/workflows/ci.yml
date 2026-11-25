@@ -47,3 +47,25 @@ jobs:
         run: cargo clippy --workspace --release -- -D warnings
       - name: Build
         run: cargo build --release
+      # What a change costs on the chip: the image's sections here and on the
+      # base branch, side by side in the job summary. Pull requests only; the
+      # base is built in its own target dir, sharing the ESP-IDF download.
+      - name: Image size against the base
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          sections() { size -A --target=elf32-little "$1" | awk 'NR>2 && $1 ~ /^\./ {print $1, $2}'; }
+          sections target/riscv32imac-esp-espidf/release/buttons >head.txt
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git worktree add ../base FETCH_HEAD
+          ln -s "$GITHUB_WORKSPACE/.embuild" ../base/.embuild
+          (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-base" cargo build --release)
+          sections target-base/riscv32imac-esp-espidf/release/buttons >base.txt
+          {
+            echo "### Image size, base -> this change (bytes)"
+            echo
+            echo "| section | base | this | change |"
+            echo "|---|---:|---:|---:|"
+            awk 'NR==FNR {b[$1]=$2; next} {d=$2-b[$1]; if (b[$1] != "" || $2 > 0) printf "| %s | %d | %d | %+d |\n", $1, b[$1], $2, d; seen[$1]=1}
+                 END {for (k in b) if (!seen[k]) printf "| %s | %d | 0 | %+d |\n", k, b[k], -b[k]}' base.txt head.txt
+          } | tee -a "$GITHUB_STEP_SUMMARY"
